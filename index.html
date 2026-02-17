@@ -572,7 +572,7 @@ async function start(){
         modalities: ["audio","text"],
         instructions: SYSTEM_PROMPT + "\n\n" + CONTROL_LAYER,
         voice: "alloy",
-        temperature: 0.2,
+        temperature: 0.6,
         input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
         turn_detection: { type: "server_vad", create_response: false }
       }
