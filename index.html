@@ -3,20 +3,25 @@
 <head>
   <meta charset="UTF-8" />
   <title>Airline Interview AI (Voice)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; }
+    button { padding: 10px 14px; margin-right: 10px; }
+    #status { margin-top: 12px; font-weight: bold; }
+    #log { margin-top: 12px; white-space: pre-wrap; background:#f6f6f6; padding:12px; border-radius:8px; }
+  </style>
 </head>
 <body>
-  <h1>Airline Interview AI</h1>
-  <button id="startBtn">Start Interview</button>
+  <h1>Airline Interview AI (Voice)</h1>
+  <button id="startBtn">Start</button>
   <button id="stopBtn" disabled>Stop</button>
-  <p id="status">Idle</p>
 
-  <script>
-    let pc = null;
-    let localStream = null;
-    let dataChannel = null;
-    let audioEl = null;
+  <div id="status">Idle</div>
+  <div id="log"></div>
 
-    const PROMPT = `You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
+<script>
+  // === 1:1 PROMPT (your exact text) ===
+  const SYSTEM_PROMPT = `You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
 
 This is a realistic interview simulation designed as a training tool for airline job preparation.
 
@@ -343,136 +348,144 @@ No motivational fluff.
 
 End debrief.`;
 
-    function setStatus(s) {
-      document.getElementById("status").textContent = s;
-    }
+  const statusEl = document.getElementById("status");
+  const logEl = document.getElementById("log");
+  const startBtn = document.getElementById("startBtn");
+  const stopBtn = document.getElementById("stopBtn");
 
-    function sendEvent(evt) {
-      if (!dataChannel || dataChannel.readyState !== "open") return;
-      dataChannel.send(JSON.stringify(evt));
-    }
+  let pc = null;
+  let localStream = null;
+  let dc = null;
 
-    async function start() {
-      document.getElementById("startBtn").disabled = true;
-      document.getElementById("stopBtn").disabled = false;
-      setStatus("Requesting microphone...");
+  function log(msg) {
+    logEl.textContent += msg + "\n";
+  }
 
-      // 1) mic
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  async function getEphemeralKey() {
+    const r = await fetch("/api/realtime-token", { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `Token endpoint failed (${r.status})`);
+    const value = data?.client_secret?.value || data?.client_secret || data?.value;
+    if (!value) throw new Error("Failed to get realtime token (client_secret.value missing).");
+    return value;
+  }
 
-      // 2) get ephemeral key from backend
-      setStatus("Getting realtime token...");
-      const tokenResp = await fetch("/api/realtime-token", { method: "POST" });
-      const tokenJson = await tokenResp.json();
+  async function start() {
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    statusEl.textContent = "Starting...";
+    logEl.textContent = "";
 
-      const EPHEMERAL_KEY = tokenJson?.client_secret?.value;
-      if (!EPHEMERAL_KEY) {
-        console.error("Token response:", tokenJson);
-        alert("Failed to get realtime token (client_secret.value missing).");
-        throw new Error("No ephemeral key");
-      }
+    try {
+      const ephemeralKey = await getEphemeralKey();
+      log("Ephemeral key OK");
 
-      // 3) WebRTC peer
-      setStatus("Connecting (WebRTC)...");
       pc = new RTCPeerConnection();
 
-      // play remote audio
-      audioEl = document.createElement("audio");
-      audioEl.autoplay = true;
-      audioEl.playsInline = true;
+      // Play AI audio
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
+      audio.playsInline = true;
       pc.ontrack = (e) => {
-        audioEl.srcObject = e.streams[0];
+        audio.srcObject = e.streams[0];
+        log("Audio track received");
       };
 
-      // send mic
-      for (const track of localStream.getTracks()) {
-        pc.addTrack(track, localStream);
-      }
+      // Microphone
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
+      log("Mic stream OK");
 
-      // data channel
-      dataChannel = pc.createDataChannel("oai-events");
-      dataChannel.onopen = () => {
-        setStatus("Connected. Starting interview...");
+      // Data channel for events + session config
+      dc = pc.createDataChannel("oai-events");
+      dc.onopen = () => {
+        log("Data channel open");
 
-        // A) set the session instructions + audio-only output
-        sendEvent({
+        // HARD REQUIREMENT: force your exact prompt + voice + turn detection
+        dc.send(JSON.stringify({
           type: "session.update",
           session: {
-            instructions: PROMPT,
-            output_modalities: ["audio"],
-          },
-        });
+            instructions: SYSTEM_PROMPT,
+            voice: "alloy",
+            // This helps conversational turn-taking (so it doesn't just sit there)
+            turn_detection: { type: "server_vad" },
+            input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+            temperature: 0.4
+          }
+        }));
 
-        // B) force the model to speak the opening and start Phase 1
-        sendEvent({
+        // Kick off: force the model to speak first with the exact calibration line
+        dc.send(JSON.stringify({
           type: "response.create",
           response: {
-            output_modalities: ["audio"],
-            instructions:
-              "Begin the interview now. Follow the instructions exactly. Start with the required opening line, then ask the first calibration question.",
-          },
-        });
+            modalities: ["audio", "text"],
+            instructions: "We will conduct an airline interview simulation. Please answer using real examples from your experience. What stage are you currently at in your aviation career?"
+          }
+        }));
+
+        statusEl.textContent = "Running";
       };
 
-      dataChannel.onmessage = (e) => {
-        // optional: debug server events
+      dc.onmessage = (ev) => {
+        // Useful for debugging what the model is doing
         try {
-          const evt = JSON.parse(e.data);
-          // uncomment if you want to see events:
-          // console.log("server event:", evt);
-          if (evt.type === "error") console.error("Realtime error:", evt);
-        } catch {}
+          const msg = JSON.parse(ev.data);
+          if (msg.type?.includes("error")) log("ERR: " + ev.data);
+          // Uncomment if you want full event spam:
+          // log(ev.data);
+        } catch {
+          // ignore
+        }
       };
 
-      // 4) SDP offer -> OpenAI Realtime calls endpoint
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      const sdpResp = await fetch("https://api.openai.com/v1/realtime/calls?model=gpt-4o-realtime-preview", {
+      // NOTE: Realtime WebRTC SDP exchange
+      const baseUrl = "https://api.openai.com/v1/realtime";
+      const model = "gpt-4o-realtime-preview";
+
+      const sdpResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${EPHEMERAL_KEY}`,
-          "Content-Type": "application/sdp",
+          "Authorization": `Bearer ${ephemeralKey}`,
+          "Content-Type": "application/sdp"
         },
-        body: offer.sdp,
+        body: offer.sdp
       });
+
+      if (!sdpResp.ok) {
+        const t = await sdpResp.text();
+        throw new Error(`OpenAI SDP failed: ${sdpResp.status} ${t}`);
+      }
 
       const answerSdp = await sdpResp.text();
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
-      setStatus("Realtime interview started (voice).");
-    }
-
-    function stop() {
-      document.getElementById("stopBtn").disabled = true;
-      document.getElementById("startBtn").disabled = false;
-
-      try {
-        if (dataChannel) dataChannel.close();
-      } catch {}
-
-      try {
-        if (pc) pc.close();
-      } catch {}
-
-      try {
-        if (localStream) localStream.getTracks().forEach((t) => t.stop());
-      } catch {}
-
-      pc = null;
-      localStream = null;
-      dataChannel = null;
-
-      setStatus("Stopped.");
-    }
-
-    document.getElementById("startBtn").onclick = () => start().catch((err) => {
-      console.error(err);
+      log("Realtime connected");
+      statusEl.textContent = "Running";
+    } catch (err) {
+      statusEl.textContent = "Error";
       alert(String(err?.message || err));
+      log("ERROR: " + String(err?.stack || err));
       stop();
-    });
+    }
+  }
 
-    document.getElementById("stopBtn").onclick = () => stop();
-  </script>
+  function stop() {
+    try { stopBtn.disabled = true; startBtn.disabled = false; } catch {}
+    statusEl.textContent = "Stopped";
+
+    if (dc) { try { dc.close(); } catch {} dc = null; }
+    if (pc) { try { pc.close(); } catch {} pc = null; }
+    if (localStream) {
+      try { localStream.getTracks().forEach(t => t.stop()); } catch {}
+      localStream = null;
+    }
+  }
+
+  startBtn.onclick = start;
+  stopBtn.onclick = stop;
+</script>
 </body>
 </html>
