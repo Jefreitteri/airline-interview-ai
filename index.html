@@ -564,7 +564,7 @@ async function start(){
     setStatus("Connected. Interview running.");
 
     // clear conversation and lock session. Important: create_response=false
-    sendEvent({ type:"conversation.clear" });
+    
 
     sendEvent({
       type: "session.update",
