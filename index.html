@@ -22,10 +22,9 @@ startBtn.onclick = async () => {
   startBtn.disabled = true;
   stopBtn.disabled = false;
 
-  // 1️⃣ Get ephemeral token from backend
+  // 🔹 Get ephemeral token
   const tokenResponse = await fetch("/api/realtime-token", { method: "POST" });
   const tokenData = await tokenResponse.json();
-
   const ephemeralKey = tokenData.client_secret?.value;
 
   if (!ephemeralKey) {
@@ -33,28 +32,81 @@ startBtn.onclick = async () => {
     return;
   }
 
-  // 2️⃣ Create WebRTC connection
+  // 🔹 Create WebRTC connection
   pc = new RTCPeerConnection();
 
-  // 3️⃣ Play AI audio
   const audio = document.createElement("audio");
   audio.autoplay = true;
   pc.ontrack = e => audio.srcObject = e.streams[0];
 
-  // 4️⃣ Get microphone
+  // 🔹 Get mic
   localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   for (const track of localStream.getTracks()) {
     pc.addTrack(track, localStream);
   }
 
-  // 5️⃣ Data channel (optional)
+  // 🔹 Data channel
   dataChannel = pc.createDataChannel("oai-events");
 
-  // 6️⃣ Create offer
+  dataChannel.onopen = () => {
+    console.log("Data channel open. Sending interview prompt...");
+
+    dataChannel.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        instructions: `You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
+
+This is a realistic interview simulation designed as a training tool for airline job preparation.
+
+You are not a coach during the interview phase.
+You do not provide feedback during the interview.
+You do not provide model answers during the interview.
+Ask one question per time.
+Do not announce the phase.
+Do not use filler acknowledgements such as:
+- "Thank you for your answer"
+- "Okay"
+- "I see"
+- "Alright"
+
+After the candidate finishes speaking, move directly to the next question or follow-up without verbal acknowledgement.
+Do not repeat or paraphrase the candidate's answer unless clarification is necessary.
+
+The interview must follow the complete structured five phase format:
+Calibration → HR & Fit → Behavioural (all competencies mandatory) → Technical → Motivation → Debrief.
+
+The behavioural section must be the longest.
+Minimum 8 primary behavioural scenarios (one per competency).
+Do not move to technical before all competencies are explored.
+
+Technical segment: 4–6 questions from mixed categories. Adjust to experience level.
+
+After interview completion say:
+"This concludes the interview simulation. We will now move to the debrief."
+
+Debrief must include:
+1. Overall impression (Readiness level + strengths + development areas)
+2. Behavioural evaluation
+3. Technical evaluation
+4. Interview behaviour
+5. Priority development plan (3–5 specific items)
+
+No praise. No humiliation. No model answers.
+
+Begin immediately with:
+
+“We will conduct an airline interview simulation. Please answer using real examples from your experience.”
+
+Ask the first calibration question.`,
+        modalities: ["audio"]
+      }
+    }));
+  };
+
+  // 🔹 Create offer
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  // 7️⃣ Send offer to OpenAI Realtime endpoint
   const baseUrl = "https://api.openai.com/v1/realtime";
   const model = "gpt-4o-realtime-preview";
 
@@ -68,7 +120,6 @@ startBtn.onclick = async () => {
   });
 
   const answerSDP = await sdpResponse.text();
-
   await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
 
   console.log("Realtime interview started");
@@ -78,9 +129,7 @@ stopBtn.onclick = () => {
   stopBtn.disabled = true;
   startBtn.disabled = false;
 
-  if (pc) {
-    pc.close();
-  }
+  if (pc) pc.close();
 
   if (localStream) {
     localStream.getTracks().forEach(track => track.stop());
