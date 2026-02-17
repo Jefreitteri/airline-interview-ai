@@ -1,32 +1,121 @@
 <!DOCTYPE html>
-<html>
+<html lang="fi">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Airline Interview AI</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    #chat { margin-top: 16px; max-width: 900px; }
+    .row { padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; margin: 8px 0; }
+    .you { background: #f7f7f7; }
+    .ai { background: #fff; }
+    #controls { margin-top: 12px; display: flex; gap: 8px; max-width: 900px; }
+    input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; }
+    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; cursor: pointer; }
+    #status { margin-top: 10px; color: #555; }
+  </style>
 </head>
+
 <body>
+  <h1>Airline Interview AI</h1>
 
-<h1>Airline Interview AI</h1>
-<button onclick="startInterview()">Start Interview</button>
+  <button id="startBtn" onclick="startInterview()">Start Interview</button>
+  <div id="status"></div>
 
-<div id="chat"></div>
+  <div id="chat"></div>
+
+  <div id="controls" style="display:none;">
+    <input id="userInput" placeholder="Kirjoita vastaus..." />
+    <button onclick="sendUser()">Send</button>
+  </div>
 
 <script>
-async function callInterviewAPI(messages) {
-  const res = await fetch("/api/interview", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages })
+  const chatEl = document.getElementById("chat");
+  const statusEl = document.getElementById("status");
+  const controlsEl = document.getElementById("controls");
+  const inputEl = document.getElementById("userInput");
+
+  // Keskusteluhistoria backendille
+  const messages = [];
+
+  function addRow(role, text) {
+    const div = document.createElement("div");
+    div.className = `row ${role === "user" ? "you" : "ai"}`;
+    div.innerText = (role === "user" ? "You: " : "AI: ") + text;
+    chatEl.appendChild(div);
+    window.scrollTo(0, document.body.scrollHeight);
+  }
+
+  async function callInterviewAPI(messages) {
+    const res = await fetch("/api/interview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages })
+    });
+
+    // jos backend kaatuu, tämä näyttää oikean syyn
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    if (!res.ok) {
+      const msg = data?.error || data?.message || data?.raw || "Unknown error";
+      throw new Error(`API ${res.status}: ${msg}`);
+    }
+
+    // odotetaan { text: "..." }
+    return data.text || data.reply || data.raw || JSON.stringify(data);
+  }
+
+  async function startInterview() {
+    try {
+      statusEl.innerText = "Starting...";
+      document.getElementById("startBtn").disabled = true;
+
+      // Eka prompti AI:lle (voit muuttaa myöhemmin)
+      messages.length = 0;
+      messages.push({
+        role: "system",
+        content: "You are an airline interview simulator. Start with a short intro and ask the first question."
+      });
+
+      const reply = await callInterviewAPI(messages);
+      messages.push({ role: "assistant", content: reply });
+
+      addRow("assistant", reply);
+      controlsEl.style.display = "flex";
+      statusEl.innerText = "Running";
+      inputEl.focus();
+    } catch (e) {
+      statusEl.innerText = "ERROR: " + e.message;
+      document.getElementById("startBtn").disabled = false;
+    }
+  }
+
+  async function sendUser() {
+    const userText = inputEl.value.trim();
+    if (!userText) return;
+
+    inputEl.value = "";
+    addRow("user", userText);
+    messages.push({ role: "user", content: userText });
+
+    try {
+      statusEl.innerText = "Thinking...";
+      const reply = await callInterviewAPI(messages);
+      messages.push({ role: "assistant", content: reply });
+      addRow("assistant", reply);
+      statusEl.innerText = "Running";
+    } catch (e) {
+      statusEl.innerText = "ERROR: " + e.message;
+    }
+  }
+
+  // Enter lähettää
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") sendUser();
   });
-
-  const data = await res.json();
-  return data.text;
-}
-
-function startInterview() {
-  alert("Interview started");
-}
 </script>
-
 </body>
 </html>
