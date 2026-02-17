@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Airline Interview AI</title>
+</head>
+<body>
+  <h1>Airline Interview AI</h1>
+  <button onclick="startInterview()">Start Interview</button>
+
+  <script>
+    async function startInterview() {
+      const response = await fetch("/api/interview", {
+        method: "POST"
+      });
+
+      const data = await response.json();
+      alert(data.message);
+    }
+  </script>
+</body>
+</html>
