@@ -1,22 +1,19 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Airline Interview AI</title>
-</head>
-<body>
-  <h1>Airline Interview AI</h1>
-  <button onclick="startInterview()">Start Interview</button>
+async function callInterviewAPI(messages) {
+  const res = await fetch("/api/interview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages }),
+  });
 
-  <script>
-    async function startInterview() {
-      const response = await fetch("/api/interview", {
-        method: "POST"
-      });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
-      const data = await response.json();
-      alert(data.message);
-    }
-  </script>
-</body>
-</html>
+  if (!res.ok) {
+    const msg = data?.message || data?.error || data?.raw || "Unknown error";
+    throw new Error(`API ${res.status}: ${msg}`);
+  }
+
+  // meidän backend palauttaa { text: "..."}
+  return data.text;
+}
