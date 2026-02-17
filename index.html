@@ -1,4 +1,3 @@
-<h2>VERSION TEST 123</h2>
 <!DOCTYPE html>
 <html>
 <head>
@@ -14,9 +13,37 @@
 <script>
 let pc;
 let localStream;
+let dataChannel;
 
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
+
+const SYSTEM_PROMPT = `You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
+
+This is a realistic interview simulation designed as a training tool for airline job preparation.
+
+You are not a coach during the interview phase.
+You do not provide feedback during the interview.
+You do not provide model answers during the interview.
+Ask one question per time.
+Do not announce the phase.
+Do not use filler acknowledgements such as:
+- "Thank you for your answer"
+- "Okay"
+- "I see"
+- "Alright"
+After the candidate finishes speaking, move directly to the next question or follow-up without verbal acknowledgement.
+Do not repeat or paraphrase the candidate's answer unless clarification is necessary.
+
+However, after the interview is completed, you will enter a structured debrief mode.
+
+Start with:
+"We will conduct an airline interview simulation. Please answer using real examples from your experience."
+
+Then begin Phase 1 calibration questions.
+
+Maintain strict structure throughout.
+`;
 
 startBtn.onclick = async () => {
   startBtn.disabled = true;
@@ -42,6 +69,25 @@ startBtn.onclick = async () => {
     pc.addTrack(track, localStream);
   }
 
+  dataChannel = pc.createDataChannel("oai-events");
+
+  dataChannel.onopen = () => {
+
+    // Send system prompt
+    dataChannel.send(JSON.stringify({
+      type: "session.update",
+      session: {
+        instructions: SYSTEM_PROMPT,
+        modalities: ["audio", "text"]
+      }
+    }));
+
+    // Force first response
+    dataChannel.send(JSON.stringify({
+      type: "response.create"
+    }));
+  };
+
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
@@ -58,7 +104,13 @@ startBtn.onclick = async () => {
   });
 
   const answerSDP = await sdpResponse.text();
-  await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
+
+  await pc.setRemoteDescription({
+    type: "answer",
+    sdp: answerSDP
+  });
+
+  console.log("Realtime interview started");
 };
 
 stopBtn.onclick = () => {
@@ -66,9 +118,12 @@ stopBtn.onclick = () => {
   startBtn.disabled = false;
 
   if (pc) pc.close();
+
   if (localStream) {
     localStream.getTracks().forEach(track => track.stop());
   }
+
+  console.log("Interview stopped");
 };
 </script>
 
