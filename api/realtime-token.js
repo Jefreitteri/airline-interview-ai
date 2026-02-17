@@ -20,7 +20,6 @@ export default async function handler(req, res) {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(r.status).json({ error: data });
 
-    // normalize for frontend
     const value = data?.client_secret?.value;
     if (!value) return res.status(500).json({ error: "Missing client_secret.value", raw: data });
 
