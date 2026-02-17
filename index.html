@@ -1,121 +1,130 @@
-<!DOCTYPE html>
-<html lang="fi">
+<!doctype html>
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Airline Interview AI</title>
+  <meta charset="utf-8" />
+  <title>Airline Interview AI (Voice)</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
-    #chat { margin-top: 16px; max-width: 900px; }
-    .row { padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; margin: 8px 0; }
-    .you { background: #f7f7f7; }
-    .ai { background: #fff; }
-    #controls { margin-top: 12px; display: flex; gap: 8px; max-width: 900px; }
-    input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; }
-    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #ccc; cursor: pointer; }
-    #status { margin-top: 10px; color: #555; }
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 900px; }
+    button { padding: 10px 14px; }
+    #log { white-space: pre-wrap; border: 1px solid #ddd; padding: 12px; border-radius: 8px; margin-top: 12px; }
+    textarea { width: 100%; height: 160px; margin-top: 12px; }
   </style>
 </head>
-
 <body>
-  <h1>Airline Interview AI</h1>
+  <h1>Airline Interview AI — Voice</h1>
 
-  <button id="startBtn" onclick="startInterview()">Start Interview</button>
-  <div id="status"></div>
+  <button id="start">Start voice interview</button>
+  <div id="status">Idle</div>
 
-  <div id="chat"></div>
+  <p><b>Prompt / system instructions (liitä sun 3.1 tähän):</b></p>
+  <textarea id="prompt"></textarea>
 
-  <div id="controls" style="display:none;">
-    <input id="userInput" placeholder="Kirjoita vastaus..." />
-    <button onclick="sendUser()">Send</button>
-  </div>
+  <div id="log"></div>
 
-<script>
-  const chatEl = document.getElementById("chat");
-  const statusEl = document.getElementById("status");
-  const controlsEl = document.getElementById("controls");
-  const inputEl = document.getElementById("userInput");
+  <script>
+    const logEl = document.getElementById("log");
+    const statusEl = document.getElementById("status");
+    const promptEl = document.getElementById("prompt");
 
-  // Keskusteluhistoria backendille
-  const messages = [];
+    let pc, dc, audioEl;
 
-  function addRow(role, text) {
-    const div = document.createElement("div");
-    div.className = `row ${role === "user" ? "you" : "ai"}`;
-    div.innerText = (role === "user" ? "You: " : "AI: ") + text;
-    chatEl.appendChild(div);
-    window.scrollTo(0, document.body.scrollHeight);
-  }
-
-  async function callInterviewAPI(messages) {
-    const res = await fetch("/api/interview", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages })
-    });
-
-    // jos backend kaatuu, tämä näyttää oikean syyn
-    const text = await res.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-    if (!res.ok) {
-      const msg = data?.error || data?.message || data?.raw || "Unknown error";
-      throw new Error(`API ${res.status}: ${msg}`);
+    function log(msg) {
+      logEl.textContent += msg + "\n";
     }
 
-    // odotetaan { text: "..." }
-    return data.text || data.reply || data.raw || JSON.stringify(data);
-  }
+    async function start() {
+      statusEl.textContent = "Starting…";
 
-  async function startInterview() {
-    try {
-      statusEl.innerText = "Starting...";
-      document.getElementById("startBtn").disabled = true;
+      // 1) get ephemeral token from our server
+      const tokenRes = await fetch("/api/token");
+      const tokenData = await tokenRes.json();
+      const EPHEMERAL_KEY = tokenData.value; // OpenAI guide :contentReference[oaicite:4]{index=4}
+      if (!EPHEMERAL_KEY) {
+        log("Token error: " + JSON.stringify(tokenData));
+        statusEl.textContent = "Token failed";
+        return;
+      }
 
-      // Eka prompti AI:lle (voit muuttaa myöhemmin)
-      messages.length = 0;
-      messages.push({
-        role: "system",
-        content: "You are an airline interview simulator. Start with a short intro and ask the first question."
+      // 2) create peer connection
+      pc = new RTCPeerConnection();
+
+      // remote audio playback
+      audioEl = document.createElement("audio");
+      audioEl.autoplay = true;
+      document.body.appendChild(audioEl);
+      pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
+
+      // local mic
+      const ms = await navigator.mediaDevices.getUserMedia({ audio: true });
+      pc.addTrack(ms.getTracks()[0]);
+
+      // data channel for events
+      dc = pc.createDataChannel("oai-events"); // OpenAI guide :contentReference[oaicite:5]{index=5}
+      dc.onopen = () => {
+        statusEl.textContent = "Connected (data channel open)";
+        log("Data channel open");
+
+        // 3) push your exact interview instructions
+        const instructions = promptEl.value?.trim() || "Conduct an airline interview simulation.";
+        dc.send(JSON.stringify({
+          type: "session.update",
+          session: {
+            instructions,
+            // keep it from interrupting constantly:
+            turn_detection: { type: "server_vad" }
+          }
+        }));
+
+        // 4) kick off with an opening question (model speaks)
+        dc.send(JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            instructions: "Aloita haastattelu lyhyellä aloituksella ja ensimmäisellä kysymyksellä."
+          }
+        }));
+      };
+
+      dc.onmessage = (e) => {
+        // Useful for debugging: server events
+        try {
+          const evt = JSON.parse(e.data);
+          if (evt.type) log("Event: " + evt.type);
+          // Optionally print partial text:
+          if (evt.type === "response.output_text.delta") log(evt.delta);
+        } catch {
+          // ignore
+        }
+      };
+
+      // 5) SDP offer/answer via OpenAI Realtime calls endpoint :contentReference[oaicite:6]{index=6}
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const sdpRes = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        body: offer.sdp,
+        headers: {
+          Authorization: `Bearer ${EPHEMERAL_KEY}`,
+          "Content-Type": "application/sdp"
+        }
       });
 
-      const reply = await callInterviewAPI(messages);
-      messages.push({ role: "assistant", content: reply });
+      const answer = { type: "answer", sdp: await sdpRes.text() };
+      await pc.setRemoteDescription(answer);
 
-      addRow("assistant", reply);
-      controlsEl.style.display = "flex";
-      statusEl.innerText = "Running";
-      inputEl.focus();
-    } catch (e) {
-      statusEl.innerText = "ERROR: " + e.message;
-      document.getElementById("startBtn").disabled = false;
+      statusEl.textContent = "Running (voice)";
+      log("Voice session running.");
     }
-  }
 
-  async function sendUser() {
-    const userText = inputEl.value.trim();
-    if (!userText) return;
+    document.getElementById("start").addEventListener("click", () => start().catch(err => {
+      console.error(err);
+      log("ERROR: " + (err?.message || err));
+      statusEl.textContent = "Error";
+    }));
 
-    inputEl.value = "";
-    addRow("user", userText);
-    messages.push({ role: "user", content: userText });
-
-    try {
-      statusEl.innerText = "Thinking...";
-      const reply = await callInterviewAPI(messages);
-      messages.push({ role: "assistant", content: reply });
-      addRow("assistant", reply);
-      statusEl.innerText = "Running";
-    } catch (e) {
-      statusEl.innerText = "ERROR: " + e.message;
-    }
-  }
-
-  // Enter lähettää
-  inputEl.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") sendUser();
-  });
-</script>
+    // Put placeholder so you remember to paste your 3.1
+    promptEl.value = `LIITÄ TÄHÄN SUN 3.1 PROMPT (system instructions) 1:1.`;
+  </script>
 </body>
 </html>
