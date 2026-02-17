@@ -1,18 +1,19 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <title>Airline Interview AI – Voice</title>
-  <style>
-    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 900px; }
-    button { padding: 12px 16px; font-size: 16px; }
-    #status { margin-top: 12px; font-weight: bold; }
-  </style>
+<meta charset="utf-8" />
+<title>Airline Interview AI – Voice</title>
+<style>
+body { font-family: system-ui, sans-serif; margin: 24px; max-width: 900px; }
+button { padding: 12px 16px; font-size: 16px; }
+#status { margin-top: 12px; font-weight: bold; }
+</style>
 </head>
+
 <body>
-  <h1>Airline Interview AI – Voice</h1>
-  <button id="start">Start Voice Interview</button>
-  <div id="status">Idle</div>
+<h1>Airline Interview AI – Voice</h1>
+<button id="start">Start Voice Interview</button>
+<div id="status">Idle</div>
 
 <script>
 let pc, dc, audioEl;
@@ -23,13 +24,13 @@ async function start() {
   const status = document.getElementById("status");
   status.innerText = "Starting...";
 
-  // 1️⃣ Get ephemeral token from backend
+  // 1️⃣ Get ephemeral token
   const tokenRes = await fetch("/api/token");
   const tokenData = await tokenRes.json();
   const EPHEMERAL_KEY = tokenData.value;
 
   if (!EPHEMERAL_KEY) {
-    alert("Token error");
+    alert("Token error. Check /api/token and API key.");
     return;
   }
 
@@ -42,7 +43,7 @@ async function start() {
   document.body.appendChild(audioEl);
   pc.ontrack = e => audioEl.srcObject = e.streams[0];
 
-  // 3️⃣ Microphone input
+  // 3️⃣ Microphone
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   pc.addTrack(stream.getTracks()[0]);
 
@@ -53,28 +54,30 @@ async function start() {
     status.innerText = "Connected – Interview running";
 
     const instructions = `
+REALTIME STABILITY RULES (CRITICAL):
+- Never interrupt while the candidate is speaking.
+- Wait clearly until the candidate has fully stopped before responding.
+- Do not use filler acknowledgements.
+- Maintain pacing equivalent to a 40–50 minute airline screening interview.
+- Internally track which competencies have been covered.
+- Do NOT transition to technical segment until ALL required competencies have been covered.
+- If unsure whether enough depth has been achieved, ask one additional behavioural scenario.
+- Do not prematurely move to debrief.
+
+────────────────────────
+
 You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
 
 This is a realistic interview simulation designed as a training tool for airline job preparation.
 
-CRITICAL REALTIME RULES:
-- Do NOT interrupt the candidate while they are speaking.
-- Wait until the candidate clearly stops speaking before responding.
-- Do NOT use filler acknowledgements.
-- Move directly to the next question after the candidate finishes.
-- Do NOT paraphrase answers unless clarification is required.
-- Maintain pacing consistent with a 40–50 minute airline screening interview.
-
-You are NOT a coach during the interview phase.
-You do NOT provide feedback during the interview.
-You do NOT provide model answers during the interview.
-Ask ONE primary question at a time.
-
-If the candidate asks for help:
-“In a real airline interview I cannot coach you. Please answer using a real example.”
-
-If the candidate tries to skip a question:
-Rephrase and ask again.
+You are not a coach during the interview phase.
+You do not provide feedback during the interview.
+You do not provide model answers during the interview.
+Ask one question per time.
+Do not announce the phase.
+Do not use filler acknowledgements.
+After the candidate finishes speaking, move directly to the next question or follow-up without verbal acknowledgement.
+Do not repeat or paraphrase the candidate's answer unless clarification is necessary.
 
 INTERVIEW STRUCTURE:
 - Calibration
@@ -84,21 +87,21 @@ INTERVIEW STRUCTURE:
 - Motivation & Realism
 - Debrief
 
-Behavioural section must be the longest part.
-Do not move to technical before all competencies are covered.
+Minimum behavioural requirement:
+- 8 primary behavioural questions (one per competency)
+- Behavioural section must be the longest part
 
 Start with:
-
 “We will conduct an airline interview simulation. Please answer using real examples from your experience.”
 
-Then begin Phase 1.
+Proceed through all phases exactly as defined.
 `;
 
     dc.send(JSON.stringify({
       type: "session.update",
       session: {
         instructions,
-        turn_detection: { type: "server_vad", silence_duration_ms: 1200 }
+        turn_detection: { type: "server_vad", silence_duration_ms: 1500 }
       }
     }));
 
