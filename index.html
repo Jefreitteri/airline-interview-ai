@@ -3,25 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <title>Airline Interview AI (Voice)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body { font-family: Arial, sans-serif; margin: 24px; }
-    button { padding: 10px 14px; margin-right: 10px; }
-    #status { margin-top: 12px; font-weight: bold; }
-    #log { margin-top: 12px; white-space: pre-wrap; background:#f6f6f6; padding:12px; border-radius:8px; }
-  </style>
 </head>
 <body>
   <h1>Airline Interview AI (Voice)</h1>
   <button id="startBtn">Start</button>
   <button id="stopBtn" disabled>Stop</button>
 
-  <div id="status">Idle</div>
-  <div id="log"></div>
-
-<script>
-  // === 1:1 PROMPT (your exact text) ===
-  const SYSTEM_PROMPT = `You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
+  <script>
+    // ======== 1) YOUR 1:1 PROMPT (INSTRUCTIONS) ========
+    const SYSTEM_PROMPT = `You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
 
 This is a realistic interview simulation designed as a training tool for airline job preparation.
 
@@ -348,104 +338,90 @@ No motivational fluff.
 
 End debrief.`;
 
-  const statusEl = document.getElementById("status");
-  const logEl = document.getElementById("log");
-  const startBtn = document.getElementById("startBtn");
-  const stopBtn = document.getElementById("stopBtn");
+    // ======== 2) WEBRTC / REALTIME WIRING ========
+    let pc, dc, localStream, audioEl;
 
-  let pc = null;
-  let localStream = null;
-  let dc = null;
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
 
-  function log(msg) {
-    logEl.textContent += msg + "\n";
-  }
+    function sendEvent(obj) {
+      if (!dc || dc.readyState !== "open") return;
+      dc.send(JSON.stringify(obj));
+    }
 
-  async function getEphemeralKey() {
-    const r = await fetch("/api/realtime-token", { method: "POST" });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || `Token endpoint failed (${r.status})`);
-    const value = data?.client_secret?.value || data?.client_secret || data?.value;
-    if (!value) throw new Error("Failed to get realtime token (client_secret.value missing).");
-    return value;
-  }
+    async function getEphemeralKey() {
+      const r = await fetch("/api/realtime-token", { method: "POST" });
+      const j = await r.json();
+      // expected: { client_secret: { value: "..." } }
+      return j?.client_secret?.value;
+    }
 
-  async function start() {
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-    statusEl.textContent = "Starting...";
-    logEl.textContent = "";
+    startBtn.onclick = async () => {
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
 
-    try {
-      const ephemeralKey = await getEphemeralKey();
-      log("Ephemeral key OK");
+      // mic
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
+      // peer
       pc = new RTCPeerConnection();
 
-      // Play AI audio
-      const audio = document.createElement("audio");
-      audio.autoplay = true;
-      audio.playsInline = true;
-      pc.ontrack = (e) => {
-        audio.srcObject = e.streams[0];
-        log("Audio track received");
-      };
+      // play AI audio
+      audioEl = document.createElement("audio");
+      audioEl.autoplay = true;
+      pc.ontrack = (e) => (audioEl.srcObject = e.streams[0]);
 
-      // Microphone
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
-      log("Mic stream OK");
+      // send mic
+      for (const track of localStream.getTracks()) {
+        pc.addTrack(track, localStream);
+      }
 
-      // Data channel for events + session config
+      // data channel
       dc = pc.createDataChannel("oai-events");
-      dc.onopen = () => {
-        log("Data channel open");
 
-        // HARD REQUIREMENT: force your exact prompt + voice + turn detection
-        dc.send(JSON.stringify({
+      dc.onopen = async () => {
+        // 1) FORCE your system prompt into the realtime session
+        sendEvent({
           type: "session.update",
           session: {
             instructions: SYSTEM_PROMPT,
-            voice: "alloy",
-            // This helps conversational turn-taking (so it doesn't just sit there)
-            turn_detection: { type: "server_vad" },
-            input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
-            temperature: 0.4
+            // voice: "alloy",   // voit vaihtaa jos haluat toisen äänen
+            temperature: 0.4,
+            modalities: ["audio", "text"]
           }
-        }));
+        });
 
-        // Kick off: force the model to speak first with the exact calibration line
-        dc.send(JSON.stringify({
+        // 2) HARD KICKOFF: make it start exactly how you want (Phase 1 start line)
+        sendEvent({
           type: "response.create",
           response: {
             modalities: ["audio", "text"],
-            instructions: "We will conduct an airline interview simulation. Please answer using real examples from your experience. What stage are you currently at in your aviation career?"
+            instructions:
+              "Start immediately. Begin exactly with: “We will conduct an airline interview simulation. Please answer using real examples from your experience.” Then ask the three calibration questions one by one.",
           }
-        }));
-
-        statusEl.textContent = "Running";
+        });
       };
 
-      dc.onmessage = (ev) => {
-        // Useful for debugging what the model is doing
-        try {
-          const msg = JSON.parse(ev.data);
-          if (msg.type?.includes("error")) log("ERR: " + ev.data);
-          // Uncomment if you want full event spam:
-          // log(ev.data);
-        } catch {
-          // ignore
-        }
+      dc.onmessage = (e) => {
+        // Optional: see events in console
+        try { console.log("EVT:", JSON.parse(e.data)); } catch {}
       };
 
+      // SDP offer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // NOTE: Realtime WebRTC SDP exchange
-      const baseUrl = "https://api.openai.com/v1/realtime";
-      const model = "gpt-4o-realtime-preview";
+      const ephemeralKey = await getEphemeralKey();
+      if (!ephemeralKey) {
+        alert("No ephemeral key from /api/realtime-token");
+        stopBtn.click();
+        return;
+      }
 
-      const sdpResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
+      const baseUrl = "https://api.openai.com/v1/realtime";
+      const model = "gpt-4o-realtime-preview"; // toimii jos sun setup jo toimi tällä
+
+      const sdpResp = await fetch(`${baseUrl}?model=${model}`, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${ephemeralKey}`,
@@ -454,38 +430,26 @@ End debrief.`;
         body: offer.sdp
       });
 
-      if (!sdpResp.ok) {
-        const t = await sdpResp.text();
-        throw new Error(`OpenAI SDP failed: ${sdpResp.status} ${t}`);
-      }
-
       const answerSdp = await sdpResp.text();
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
 
-      log("Realtime connected");
-      statusEl.textContent = "Running";
-    } catch (err) {
-      statusEl.textContent = "Error";
-      alert(String(err?.message || err));
-      log("ERROR: " + String(err?.stack || err));
-      stop();
-    }
-  }
+      console.log("Realtime interview started");
+    };
 
-  function stop() {
-    try { stopBtn.disabled = true; startBtn.disabled = false; } catch {}
-    statusEl.textContent = "Stopped";
+    stopBtn.onclick = () => {
+      stopBtn.disabled = true;
+      startBtn.disabled = false;
 
-    if (dc) { try { dc.close(); } catch {} dc = null; }
-    if (pc) { try { pc.close(); } catch {} pc = null; }
-    if (localStream) {
-      try { localStream.getTracks().forEach(t => t.stop()); } catch {}
-      localStream = null;
-    }
-  }
+      try { if (dc) dc.close(); } catch {}
+      try { if (pc) pc.close(); } catch {}
+      dc = null; pc = null;
 
-  startBtn.onclick = start;
-  stopBtn.onclick = stop;
-</script>
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+        localStream = null;
+      }
+      console.log("Interview stopped");
+    };
+  </script>
 </body>
 </html>
