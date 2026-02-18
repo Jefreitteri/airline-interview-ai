@@ -1,111 +1,454 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Airline Interview AI (Voice)</title>
+  <title>Airline Interview AI (Locked + Gated)</title>
   <style>
-    body { font-family: system-ui, Arial, sans-serif; margin: 20px; }
-    button { margin-right: 10px; padding: 10px 14px; }
-    #status { margin: 10px 0; color: #444; }
-    #log { white-space: pre-wrap; font-size: 12px; color: #333; background:#f6f6f6; padding:10px; border-radius:8px; max-height: 40vh; overflow:auto; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 18px; }
+    button { padding: 10px 14px; margin-right: 10px; }
+    #status { margin-top: 10px; opacity: 0.85; }
+    #log { margin-top: 10px; white-space: pre-wrap; font-size: 12px; opacity: 0.8; max-height: 45vh; overflow:auto; background:#f6f6f6; padding:10px; border-radius:8px;}
   </style>
 </head>
 <body>
-  <h1>Airline Interview AI 123 (Voice)</h1>
-
+  <h1>Airline Interview AI (Locked + Gated)</h1>
   <button id="startBtn">Start</button>
   <button id="stopBtn" disabled>Stop</button>
-
-  <div id="status">Idle.</div>
+  <div id="status">Idle</div>
   <div id="log"></div>
 
 <script>
-let pc, localStream, dataChannel, audioEl;
+/**
+ * KEY IDEA:
+ * - Model NEVER decides progression.
+ * - Client gates progression based on transcript quality.
+ * - Model only reads out the exact question we give it.
+ * - This makes speedrun impossible unless user provides minimum evidence.
+ */
 
 const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
 const statusEl = document.getElementById("status");
 const logEl    = document.getElementById("log");
+const setStatus = (s) => statusEl.textContent = s;
+const log = (s) => { logEl.textContent = (logEl.textContent + s + "\n").slice(-12000); };
 
-function log(msg){ logEl.textContent = (logEl.textContent + msg + "\n").slice(-8000); }
+let pc=null, dc=null, localStream=null, audioEl=null;
 
-async function start(){
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  logEl.textContent = "";
-  statusEl.textContent = "Requesting microphone…";
+// ===== System instructions (keep this short + strict; we control flow in client) =====
+const SYSTEM = `
+You are a three-member airline interview panel.
 
-  const tokenResp = await fetch("/api/realtime-token", { method: "POST" });
-  const tokenData = await tokenResp.json().catch(()=>({}));
-  const ephemeralKey = tokenData?.client_secret?.value;
+CRITICAL:
+- Speak Finnish only.
+- Keep aviation/technical terms in English (do NOT translate): V1, V2, balanced field length, accelerate-stop distance, stabilized approach, DA, MDA, contingency fuel, alternate fuel, windshear, threat and error management, situational awareness, sterile cockpit, RVSM, CAT I, CAT III, pilot flying, pilot monitoring.
+- Output ONLY the exact next question provided by the client. No commentary. No coaching. No filler acknowledgements ("kiitos", "ymmärretty", "okei").
+- Ask ONE question at a time.
+- Keep it concise.
+If user asks for help: reply exactly:
+“In a real airline interview I cannot coach you. Please answer using a real example.”
+`;
 
-  if (!ephemeralKey) {
-    console.log(tokenData);
-    alert("Failed to get realtime token. Check Vercel env OPENAI_API_KEY + function logs.");
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    statusEl.textContent = "Idle.";
+// ===== Flow =====
+const FLOW = {
+  phase: 1, // 1 cal, 2 HR, 3 behavioural, 4 tech, 5 motivation, 6 end/debrief (later)
+  idx: 0,
+  level: null,
+  cal: { stage:"", hours:"", interviews:"" },
+  // behavioural competency checklist
+  comp: [
+    { key:"safety", name:"Turvallisuusajattelu & sääntöjen noudattaminen", done:false },
+    { key:"decision", name:"Päätöksenteko & ongelmanratkaisu", done:false },
+    { key:"risk", name:"Risk assessment", done:false },
+    { key:"comm", name:"Viestintä", done:false },
+    { key:"crm", name:"Tiimityö & CRM", done:false },
+    { key:"stress", name:"Stressi & workload", done:false },
+    { key:"self", name:"Itsetuntemus", done:false },
+    { key:"prof", name:"Ammattimaisuus & luotettavuus", done:false },
+  ],
+  // gating state for current behavioural question
+  gate: {
+    // require: has example + has outcome + has at least 2 evidence anchors
+    hasExample:false,
+    hasOutcome:false,
+    anchors: 0
+  }
+};
+
+const Q_CAL = [
+  { id:"cal_stage", text:"Mikä on nykyinen vaihe ilmailu-urallasi (opiskelija/CPL/IR jne.)?" },
+  { id:"cal_hours", text:"Kuinka paljon sinulla on karkeasti lentotunteja yhteensä?" },
+  { id:"cal_prev",  text:"Oletko aiemmin ollut lentoyhtiön haastattelussa? Jos olet, missä vaiheessa prosessia?" }
+];
+
+const Q_HR = [
+  { id:"hr_about", text:"Kerro lyhyesti itsestäsi ja taustastasi." },
+  { id:"hr_why_airline", text:"Miksi haluat töihin tähän lentoyhtiöön?" },
+  { id:"hr_why_you", text:"Miksi meidän pitäisi valita juuri sinut?" },
+  { id:"hr_dev", text:"Mikä on yksi selkeä kehitysalue, jota harjoittelet juuri nyt?" },
+];
+
+// Behavioural questions (one per competency; Finnish questions, English terms where needed)
+const Q_BEH = [
+  { comp:"safety",  text:"Kuvaile tilanne, jossa jouduit noudattamaan sääntöä tai SOPia vaikka se oli epämukavaa. Mitä tapahtui ja mitä teit?" },
+  { comp:"decision",text:"Kuvaile tilanne, jossa jouduit tekemään päätöksen paineen alla. Mitä vaihtoehtoja harkitsit ja mikä laukaisi lopullisen päätöksen?" },
+  { comp:"risk",    text:"Kuvaile tilanne, jossa tunnistit riskin ajoissa. Miten arvioit riskin ja mitä teit sen hallitsemiseksi?" },
+  { comp:"comm",    text:"Kuvaile tilanne, jossa jouduit viestimään kriittistä tietoa nopeasti ja selkeästi. Miten varmistit, että viesti meni perille?" },
+  { comp:"crm",     text:"Kuvaile tilanne, jossa tiimityö tai CRM muutti lopputulosta. Mikä oli roolisi ja mitä teit?" },
+  { comp:"stress",  text:"Kuvaile tilanne, jossa workload tai stressi oli korkea. Miten priorisoit ja hallitsit kuormaa?" },
+  { comp:"self",    text:"Kuvaile tilanne, jossa teit virheen tai suorituksesi jäi vajaaksi. Mitä opit ja mitä muutui sen jälkeen?" },
+  { comp:"prof",    text:"Kuvaile tilanne, jossa ammattimaisuus tai luotettavuus punnittiin. Miksi se oli vaikea ja miten toimit?" },
+];
+
+// Technical question banks (terms kept English)
+const TECH_L1 = [
+  "Mikä on ero DA ja MDA?",
+  "Mitä tarkoittaa stabilized approach?",
+  "Mikä on sterile cockpit -säännön tarkoitus?",
+  "Mitä eroa on pilot flying ja pilot monitoring -rooleilla?"
+];
+const TECH_L2 = [
+  "Mikä on ero V1 ja V2?",
+  "Mitkä tekijät vaikuttavat takeoff performanceen?",
+  "Mitä tarkoittaa contingency fuel ja mihin sitä käytetään?",
+  "Mitä on threat and error management käytännössä?",
+  "Mitä on situational awareness ja miten se tyypillisesti heikkenee?"
+];
+const TECH_L3 = [
+  "Mitä tarkoittaa balanced field length?",
+  "Mitä tapahtuu, jos engine fails after V1?",
+  "Milloin destination alternate on pakko nimetä?",
+  "Missä olosuhteissa airframe icing on todennäköisintä?",
+  "Mikä on RVSM ja miksi se on tärkeä?",
+  "Mikä on ero CAT I ja CAT III approach?"
+];
+
+const Q_MOT = [
+  "Missä näet itsesi viiden vuoden päästä?",
+  "Mikä tulee olemaan haastavinta airline-linjatyössä?",
+  "Mikä voisi saada sinut lähtemään lentoyhtiöstä?"
+];
+
+// ===== Helpers =====
+function sendEvent(obj){
+  if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
+}
+
+function askExact(questionText, preface=null){
+  const instructions = preface
+    ? `${preface}\nKysy TÄSMÄLLEEN tämä yksi kysymys seuraavaksi, etkä mitään muuta:\n${questionText}`
+    : `Kysy TÄSMÄLLEEN tämä yksi kysymys seuraavaksi, etkä mitään muuta:\n${questionText}`;
+
+  sendEvent({
+    type: "response.create",
+    response: { modalities: ["audio","text"], instructions }
+  });
+}
+
+function pickLevel(stage, hours){
+  const t = (stage+" "+hours).toLowerCase();
+  const m = t.match(/(\d{1,6})/);
+  const h = m ? parseInt(m[1],10) : null;
+  const advanced = ["cpl","atpl","ir","me","fo","captain","type"].some(k=>t.includes(k));
+  if (h !== null) {
+    if (h < 250 && !advanced) return 1;
+    if (h < 1200 && !t.includes("captain")) return 2;
+    return 3;
+  }
+  return advanced ? 2 : 1;
+}
+
+// ===== GATING (anti-speedrun) =====
+const NONANSWER_PATTERNS = [
+  "en tiedä", "en osaa", "en ole koskaan", "en ole ikinä", "ei ole kokemusta", "ei oo kokemusta",
+  "en muista", "ei tule mieleen", "en pysty", "vaikea sanoa"
+];
+
+function normalize(s){ return (s||"").toLowerCase().replace(/\s+/g," ").trim(); }
+
+function isNonAnswer(text){
+  const n = normalize(text);
+  if (!n) return true;
+  if (n.length < 18) return true; // too short
+  return NONANSWER_PATTERNS.some(p => n.includes(p));
+}
+
+// crude "example" detection: past tense markers / concrete context words
+function detectExample(text){
+  const n = normalize(text);
+  const cues = ["tilanne", "kerran", "silloin", "olin", "meillä", "teimme", "päätin", "jouduin", "kun", "tapahtui"];
+  return cues.some(c => n.includes(c));
+}
+
+// crude outcome detection
+function detectOutcome(text){
+  const n = normalize(text);
+  const cues = ["lopputulos", "seurauks", "tulos", "päädyimme", "onnistui", "ei onnistunut", "oppi", "sen jälkeen"];
+  return cues.some(c => n.includes(c));
+}
+
+// evidence anchors: trigger, alternatives, risk, comm, learn (need >=2)
+function countAnchors(text){
+  const n = normalize(text);
+  let a = 0;
+  if (["laukaisi","trigger","raja","minimi","hard limit","päätöskriteeri"].some(x=>n.includes(x))) a++;
+  if (["vaihtoehto","harkitsin","option"].some(x=>n.includes(x))) a++;
+  if (["riski","risk","trade-off","kompromissi"].some(x=>n.includes(x))) a++;
+  if (["kerroin","kommunikoin","brief","crm","keskustelin"].some(x=>n.includes(x))) a++;
+  if (["opin","oppia","jatkossa","muutin"].some(x=>n.includes(x))) a++;
+  return a;
+}
+
+function resetGate(){
+  FLOW.gate = { hasExample:false, hasOutcome:false, anchors:0 };
+}
+
+function updateGateFromAnswer(text){
+  FLOW.gate.hasExample = FLOW.gate.hasExample || detectExample(text);
+  FLOW.gate.hasOutcome = FLOW.gate.hasOutcome || detectOutcome(text);
+  FLOW.gate.anchors = Math.max(FLOW.gate.anchors, countAnchors(text));
+}
+
+function gatePassed(){
+  return FLOW.gate.hasExample && FLOW.gate.hasOutcome && FLOW.gate.anchors >= 2;
+}
+
+function currentBehavioural(){
+  // return next not-done competency question
+  for (const q of Q_BEH) {
+    const c = FLOW.comp.find(x=>x.key===q.comp);
+    if (c && !c.done) return q;
+  }
+  return null;
+}
+
+function allCompetenciesDone(){
+  return FLOW.comp.every(c=>c.done);
+}
+
+// ===== Progression =====
+function askNext(){
+  if (FLOW.phase === 1) {
+    const q = Q_CAL[FLOW.idx];
+    if (!q) { FLOW.level = pickLevel(FLOW.cal.stage, FLOW.cal.hours); FLOW.phase=2; FLOW.idx=0; askNext(); return; }
+    if (FLOW.idx===0) {
+      askExact(q.text, "Aloita nyt. Sano ensin täsmälleen: “Pidämme lentoyhtiöhaastattelusimulaation. Vastaa oikeilla esimerkeillä omasta kokemuksestasi.”");
+    } else {
+      askExact(q.text);
+    }
     return;
   }
 
-  pc = new RTCPeerConnection();
+  if (FLOW.phase === 2) {
+    const q = Q_HR[FLOW.idx];
+    if (!q) { FLOW.phase=3; FLOW.idx=0; resetGate(); askNext(); return; }
+    askExact(q.text);
+    return;
+  }
 
+  if (FLOW.phase === 3) {
+    // keep asking same competency until gate passes, then mark done and move to next
+    const q = currentBehavioural();
+    if (!q) { FLOW.phase=4; FLOW.idx=0; askNext(); return; }
+    askExact(q.text);
+    return;
+  }
+
+  if (FLOW.phase === 4) {
+    if (FLOW.idx === 0) {
+      // announce technical segment (exact line)
+      const bank = (FLOW.level===3?TECH_L3:(FLOW.level===2?TECH_L2:TECH_L1));
+      askExact(bank[0], "Sano ensin täsmälleen: “Siirrytään lyhyeen technical segment -osuuteen.”");
+      return;
+    }
+    const bank = (FLOW.level===3?TECH_L3:(FLOW.level===2?TECH_L2:TECH_L1));
+    const q = bank[FLOW.idx];
+    if (!q || FLOW.idx >= Math.min(6, bank.length)) { FLOW.phase=5; FLOW.idx=0; askNext(); return; }
+    askExact(q);
+    return;
+  }
+
+  if (FLOW.phase === 5) {
+    const q = Q_MOT[FLOW.idx];
+    if (!q) {
+      // debrief not implemented in this minimal gated version (next step)
+      askExact("Tämä päättää simulaation. Kiitos.", null);
+      FLOW.phase=6;
+      return;
+    }
+    askExact(q);
+    return;
+  }
+}
+
+function handleUserTranscript(text){
+  const t = (text||"").trim();
+  log("USER: " + t);
+
+  // Phase 1 store
+  if (FLOW.phase === 1) {
+    if (FLOW.idx === 0) FLOW.cal.stage = t;
+    if (FLOW.idx === 1) FLOW.cal.hours = t;
+    if (FLOW.idx === 2) FLOW.cal.interviews = t;
+    FLOW.idx++;
+    askNext();
+    return;
+  }
+
+  // Phase 2 HR: allow weak answers but keep moving (1 follow-up later if you want)
+  if (FLOW.phase === 2) {
+    FLOW.idx++;
+    askNext();
+    return;
+  }
+
+  // Phase 3 behavioural: GATED
+  if (FLOW.phase === 3) {
+    // If non-answer -> do not progress. Ask for other context.
+    if (isNonAnswer(t)) {
+      askExact(
+        "Anna esimerkki muusta kontekstista: työ, opinnot, urheilu, johtaminen tai henkilökohtainen paine. Kerro tilanne ja mitä teit.",
+        "Et voi edetä ilman konkreettista esimerkkiä."
+      );
+      return;
+    }
+
+    updateGateFromAnswer(t);
+
+    if (!FLOW.gate.hasExample) {
+      askExact("Kerro yksi konkreettinen tilanne: missä olit, mitä tapahtui, ja mikä oli sinun roolisi?");
+      return;
+    }
+    if (!FLOW.gate.hasOutcome) {
+      askExact("Mikä oli lopputulos ja mitä muuttui sen jälkeen?");
+      return;
+    }
+    if (FLOW.gate.anchors < 2) {
+      // targeted follow-up to force anchors
+      askExact("Mitkä vaihtoehdot harkitsit ja mikä oli objektiivinen trigger päätökselle?");
+      return;
+    }
+
+    // Passed gate -> mark this competency done and reset gate
+    const q = currentBehavioural();
+    const c = FLOW.comp.find(x=>x.key===q.comp);
+    if (c) c.done = true;
+    resetGate();
+
+    // Continue to next competency question
+    askNext();
+    return;
+  }
+
+  // Technical + Motivation: just progress
+  if (FLOW.phase === 4 || FLOW.phase === 5) {
+    FLOW.idx++;
+    askNext();
+    return;
+  }
+}
+
+// ===== WebRTC =====
+async function getEphemeralKey(){
+  const r = await fetch("/api/realtime-token", { method:"POST" });
+  const j = await r.json().catch(()=>({}));
+  const key = j?.client_secret?.value;
+  if (!key) throw new Error("No client_secret.value from /api/realtime-token");
+  return key;
+}
+
+function sendSessionUpdate(){
+  sendEvent({
+    type: "session.update",
+    session: {
+      modalities: ["audio","text"],
+      instructions: SYSTEM,
+      temperature: 0.6,
+      voice: "alloy",
+      input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+      // Key: we control when model speaks
+      turn_detection: { type: "semantic_vad", eagerness: "medium", create_response: false }
+    }
+  });
+}
+
+async function start(){
+  startBtn.disabled=true;
+  stopBtn.disabled=false;
+  logEl.textContent="";
+  setStatus("Starting...");
+
+  // reset flow
+  FLOW.phase=1; FLOW.idx=0; FLOW.level=null;
+  FLOW.cal={stage:"",hours:"",interviews:""};
+  FLOW.comp.forEach(c=>c.done=false);
+  resetGate();
+
+  const ephemeralKey = await getEphemeralKey();
+
+  pc = new RTCPeerConnection();
   audioEl = document.createElement("audio");
   audioEl.autoplay = true;
   audioEl.playsInline = true;
   pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
 
-  dataChannel = pc.createDataChannel("oai-events");
-  dataChannel.onmessage = (ev) => {
-    try {
-      const msg = JSON.parse(ev.data);
-      if (msg?.type === "error") log("ERROR: " + ev.data);
-    } catch {}
+  localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+  localStream.getTracks().forEach(t=>pc.addTrack(t, localStream));
+
+  dc = pc.createDataChannel("oai-events");
+  dc.onopen = () => {
+    setStatus("Connected.");
+    log("Data channel open");
+
+    sendSessionUpdate();
+
+    // kickoff first question via client flow
+    askNext();
   };
 
-  localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  dc.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+
+    if (msg.type === "error") log("ERROR: " + JSON.stringify(msg));
+
+    // finalized transcript event
+    if (msg.type === "conversation.item.input_audio_transcription.completed") {
+      const text = msg.transcript || msg.text || "";
+      handleUserTranscript(text);
+    }
+  };
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  statusEl.textContent = "Connecting…";
-
-  const baseUrl = "https://api.openai.com/v1/realtime";
-  const model = "gpt-4o-realtime-preview";
-
-  const sdpResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${ephemeralKey}`,
-      "Content-Type": "application/sdp"
+  const sdpRes = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent("gpt-4o-realtime-preview")}`, {
+    method:"POST",
+    headers:{
+      Authorization:`Bearer ${ephemeralKey}`,
+      "Content-Type":"application/sdp"
     },
     body: offer.sdp
   });
 
-  const answerSDP = await sdpResp.text();
-  await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
+  const answerSdp = await sdpRes.text();
+  await pc.setRemoteDescription({ type:"answer", sdp: answerSdp });
 
-  statusEl.textContent = "Connected. Speak normally.";
-  log("Connected.");
+  setStatus("Realtime started. Speak.");
+  log("Realtime connected.");
 }
 
 function stop(){
-  stopBtn.disabled = true;
-  startBtn.disabled = false;
+  stopBtn.disabled=true;
+  startBtn.disabled=false;
+  setStatus("Stopped.");
 
-  try { if (dataChannel) dataChannel.close(); } catch {}
-  dataChannel = null;
-
+  try { if (dc) dc.close(); } catch {}
   try { if (pc) pc.close(); } catch {}
-  pc = null;
+  dc=null; pc=null;
 
-  try { if (localStream) localStream.getTracks().forEach(t => t.stop()); } catch {}
-  localStream = null;
-
-  statusEl.textContent = "Stopped.";
-  log("Stopped.");
+  try { if (localStream) localStream.getTracks().forEach(t=>t.stop()); } catch {}
+  localStream=null;
 }
 
 startBtn.onclick = () => start().catch(e => {
@@ -114,7 +457,6 @@ startBtn.onclick = () => start().catch(e => {
   log("START ERROR: " + (e?.message || String(e)));
   stop();
 });
-
 stopBtn.onclick = stop;
 </script>
 </body>
