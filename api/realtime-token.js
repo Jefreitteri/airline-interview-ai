@@ -1,15 +1,11 @@
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: "Missing OPENAI_API_KEY in Vercel env" });
 
   try {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY in Vercel env vars" });
-    }
-
-    // --- YOUR 1:1 PROMPT (system/instructions) + hard locks ---
+    // --- Your prompt 1:1 ---
     const INTERVIEW_PROMPT = `You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
 
 This is a realistic interview simulation designed as a training tool for airline job preparation.
@@ -56,13 +52,6 @@ Rephrase and ask again.
 STRUCTURE
 
 You will move through five phases.
-STRUCTURE ENFORCEMENT (critical):
-- You MUST complete Phase 1 exactly with the 3 calibration questions (stage, hours, previous interviews before any other topic.
-- You MUST complete phase 2 with the 4 HR questions before phase 3.
-- In phase 3, you MUST ask atleast 8 primary behavioural scenario questions, one per competency listed, before starting phase 4.
-- Keep an internal checklist of the 8 competencies; do not proceed to technical until all 8 are covered.
-- Do not end the interview before phase 5 is completed and debrief is delivered.
-- Interview should last 45 - 50 minutes.
 
 ⸻
 
@@ -345,44 +334,64 @@ No motivational fluff.
 End debrief.
 `;
 
-    // Extra hard constraints to stop "20s lecture" + force correct start
+    // --- Added: anti-speedrun + Finnish language with English aviation terms ---
     const LOCKS = `
-CRITICAL OUTPUT FORMAT RULES (must follow):
-- During INTERVIEW MODE: output ONLY the next interview question. No commentary, no explanation, no advice.
-- Ask exactly ONE question per turn.
-- Max 25 words total per output.
-- The first assistant output MUST be exactly:
-  "We will conduct an airline interview simulation. Please answer using real examples from your experience."
-  followed by ONE calibration question only (start with the "stage" question).
-- Do not ask cabin-crew/passenger handling scenarios unless the candidate explicitly indicates airline operational experience.
+CRITICAL OUTPUT RULES:
+- INTERVIEW MODE: output ONLY the next interview question. No commentary, no explanation, no advice.
+- Ask EXACTLY ONE question per turn.
+- No filler acknowledgements (e.g., "ymmärretty", "kiitos", "okei").
+- Keep questions concise (max ~25 words) unless a follow-up must reference missing evidence.
+
+LANGUAGE:
+- Conduct the entire interview in Finnish only.
+- Use natural, idiomatic Finnish.
+- DO NOT mix English and Finnish sentences.
+- HOWEVER: keep aviation/technical terms in English (do NOT translate):
+  V1, V2, balanced field length, accelerate-stop distance, stabilized approach, DA, MDA,
+  contingency fuel, alternate fuel, windshear, threat and error management, situational awareness,
+  sterile cockpit, RVSM, CAT I, CAT III, pilot flying, pilot monitoring.
+
+ANTI-SPEEDRUN GATE (critical):
+- Do NOT progress to the next primary question if the candidate answer is vague/generic, "I don't know",
+  "I have never experienced that", or lacks a concrete example.
+- If no example: ask for an example from another context (work, studies, sports, military, personal life).
+- If still none: state once:
+  "Aidossa lentoyhtiöhaastattelussa kyvyttömyys antaa konkreettinen esimerkki olisi merkittävä huoli."
+  Then ask a simplified version of the same question again.
+- Do NOT move to the next competency until a concrete example exists.
+
+MINIMUM DEPTH RULE:
+- A behavioural answer must contain: Situation + Decision + Action + Outcome.
+- If any part is missing: ask a targeted follow-up to obtain it BEFORE moving on.
+
+STRUCTURE ENFORCEMENT:
+- Must complete Phase 1 (3 calibration questions) before anything else.
+- Must complete Phase 2 (4 HR questions) before Phase 3.
+- In Phase 3 you MUST cover ALL listed competencies with at least one primary scenario question each
+  before Phase 4 technical segment.
+- Do NOT start Phase 4 early.
 `;
 
-    const sessionPayload = {
+    const payload = {
       model: "gpt-4o-realtime-preview",
       voice: "alloy",
-      temperature: 0.6, // (your earlier error proved <0.6 can be rejected in some configs)
+      temperature: 0.6,
       instructions: `${INTERVIEW_PROMPT}\n\n${LOCKS}`,
-      // Better for not interrupting:
+      // Less interruptions but not "dead silent":
       turn_detection: { type: "semantic_vad", eagerness: "medium" },
     };
 
     const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(sessionPayload),
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
 
     const data = await r.json();
-    if (!r.ok) {
-      return res.status(500).json({ error: "Failed to create realtime session", details: data });
-    }
+    if (!r.ok) return res.status(500).json({ error: "Failed to create realtime session", details: data });
 
-    // Expect: data.client_secret.value
     return res.status(200).json(data);
-  } catch (err) {
-    return res.status(500).json({ error: String(err) });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || String(e) });
   }
 }
