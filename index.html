@@ -19,25 +19,15 @@
   <div id="log"></div>
 
 <script>
-/**
- * What this version guarantees:
- * - Default language English. Switch to ANY language only if candidate explicitly asks.
- * - Aviation/technical terms ALWAYS remain English (never translated).
- * - The model NEVER freestyles interview structure: client controls the flow.
- * - Anti-speedrun gate: if answer is weak/non-answer -> it does NOT progress.
- * - No coaching during interview. Debrief at the end.
- */
-
 const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
 const statusEl = document.getElementById("status");
 const logEl    = document.getElementById("log");
 const setStatus = (s) => statusEl.textContent = s;
-const log = (s) => { logEl.textContent = (logEl.textContent + s + "\n").slice(-14000); };
+const log = (s) => { logEl.textContent = (logEl.textContent + s + "\n").slice(-12000); };
 
 let pc=null, dc=null, localStream=null, audioEl=null;
 
-// ---- Terms that must remain English always
 const ENGLISH_TERMS = [
   "V1","V2","balanced field length","accelerate-stop distance","stabilized approach",
   "DA","MDA","contingency fuel","alternate fuel","windshear",
@@ -45,47 +35,63 @@ const ENGLISH_TERMS = [
   "RVSM","CAT I","CAT III","pilot flying","pilot monitoring"
 ];
 
-// ---- Session system instructions (short + strict)
-// NOTE: we do NOT rely on the model to enforce structure; we enforce structure in this client.
 const SYSTEM = `
 You are a three-member airline interview panel conducting a realistic airline screening interview simulation for a pilot role.
 
 DEFAULT LANGUAGE:
 - Default language is English.
 - Switch to the candidate’s requested language ONLY if the candidate explicitly asks.
-- If a language is requested, ask questions in that language.
 
 TERMS:
 - Keep ALL aviation/technical terms in English and do NOT translate them.
-- Examples that must remain English: ${ENGLISH_TERMS.join(", ")}.
+- Examples: ${ENGLISH_TERMS.join(", ")}.
 
 OUTPUT RULES:
 - Output ONLY the question requested by the client instructions.
 - Ask ONE question at a time.
 - Do NOT add commentary, explanations, coaching, or advice.
-- No filler acknowledgements (e.g., "thank you", "okay", "understood", "kiitos", "ymmärretty").
+- No filler acknowledgements.
 - If candidate asks for help: reply exactly:
   "In a real airline interview I cannot coach you. Please answer using a real example."
 `;
 
-// ---- Flow state
+// ===== FLOW STATE =====
 const FLOW = {
-  lang: "English",        // default
-  phase: 1,               // 1 calibration, 2 HR, 3 behavioural, 4 technical, 5 motivation, 6 debrief
+  lang: "English",
+  phase: 1,
   idx: 0,
-  level: 2,               // will be estimated after calibration
-  followupsLeft: 0,
-  lastPrimaryId: null,
-  // gating for behavioural questions
-  gate: { hasExample:false, hasOutcome:false, anchors:0, attempts:0 },
-  // store answers for debrief
-  transcript: []
+  level: 2,
+  transcript: [],
+  // IMPORTANT:
+  // - armed = we have asked a question and we are now willing to accept user transcript as the answer
+  armed: false,
+  awaitingId: null,
+  // prevents multiple asks overlapping
+  busyAsking: false,
+  // gate (behavioural)
+  gate: { hasExample:false, hasOutcome:false, anchors:0 }
 };
 
-// ---- Question sets (primary questions)
+const store = { stage:"", hours:"", prev:"" };
+
+function normalize(s){ return (s||"").toLowerCase().replace(/\s+/g," ").trim(); }
+
+function detectLanguageRequest(userText){
+  const t = normalize(userText);
+  if (t.includes("suomeksi") || t.includes("in finnish") || t.includes("finnish")) return "Finnish";
+  if (t.includes("englanniksi") || t.includes("in english") || t.includes("english")) return "English";
+  const m = t.match(/\bin ([a-zäöå]+)\b/);
+  if (m && m[1]) {
+    const lang = m[1].charAt(0).toUpperCase() + m[1].slice(1);
+    if (lang.length >= 4) return lang;
+  }
+  return null;
+}
+
+// ---- Question banks (English base)
 const Q_CAL = [
-  { id:"cal_intro", text:`We will conduct an airline interview simulation. Please answer using real examples from your experience.` , isStatement:true },
-  { id:"cal_stage", text:"What stage are you currently at in your aviation career (student/CPL/IR etc.)?" },
+  // NOTE: First question is INTRO + stage combined to remove any “skipping”
+  { id:"cal_stage", text:"We will conduct an airline interview simulation. Please answer using real examples from your experience. What stage are you currently at in your aviation career (student/CPL/IR etc.)?" },
   { id:"cal_hours", text:"Approximately how many flight hours do you have?" },
   { id:"cal_prev",  text:"Have you previously attended airline interviews? If yes, how far did you get in the process?" }
 ];
@@ -97,19 +103,17 @@ const Q_HR = [
   { id:"hr_dev", text:"What is one development area you are currently working on?" }
 ];
 
-// 8 competencies (one primary each) — no passenger/cabin-career-advice nonsense
 const Q_BEH = [
-  { id:"beh_safety", text:"Describe a time you had to follow rules or SOP strictly even when it was inconvenient. What happened and what did you do?" },
-  { id:"beh_decision", text:"Describe a situation where you had to make a decision under time pressure. What options did you consider and what triggered your final decision?" },
-  { id:"beh_risk", text:"Describe a time you identified a risk early. How did you assess it and what action did you take to manage it?" },
-  { id:"beh_comm", text:"Describe a time you had to communicate critical information clearly under pressure. How did you ensure it was understood?" },
-  { id:"beh_crm", text:"Describe a situation where teamwork or CRM made a clear difference to the outcome. What was your role and what did you do?" },
-  { id:"beh_stress", text:"Describe a time you faced high workload or stress. How did you prioritize and manage workload?" },
-  { id:"beh_self", text:"Describe a time you made a mistake or your performance fell short. What did you learn and what changed afterwards?" },
-  { id:"beh_prof", text:"Describe a time professionalism or reliability mattered. What was at stake and how did you behave?" }
+  { id:"beh_safety",  text:"Describe a time you had to follow rules or SOP strictly even when it was inconvenient. What happened and what did you do?" },
+  { id:"beh_decision",text:"Describe a situation where you had to make a decision under time pressure. What options did you consider and what triggered your final decision?" },
+  { id:"beh_risk",    text:"Describe a time you identified a risk early. How did you assess it and what action did you take to manage it?" },
+  { id:"beh_comm",    text:"Describe a time you had to communicate critical information clearly under pressure. How did you ensure it was understood?" },
+  { id:"beh_crm",     text:"Describe a situation where teamwork or CRM made a clear difference. What was your role and what did you do?" },
+  { id:"beh_stress",  text:"Describe a time you faced high workload or stress. How did you prioritize and manage workload?" },
+  { id:"beh_self",    text:"Describe a time you made a mistake or your performance fell short. What did you learn and what changed afterwards?" },
+  { id:"beh_prof",    text:"Describe a time professionalism or reliability mattered. What was at stake and how did you behave?" }
 ];
 
-// Technical banks (choose 4–6; keep terms English)
 const TECH_L1 = [
   "What is the difference between DA and MDA?",
   "What defines a stabilized approach?",
@@ -133,76 +137,49 @@ const TECH_L3 = [
 ];
 
 const Q_MOT = [
-  { id:"mot_5y", text:"Where do you see yourself in five years?" },
-  { id:"mot_challenge", text:"What do you think will be most challenging about airline life?" },
-  { id:"mot_leave", text:"What might cause you to leave an airline?" }
+  { id:"mot_1", text:"Where do you see yourself in five years?" },
+  { id:"mot_2", text:"What do you think will be most challenging about airline life?" },
+  { id:"mot_3", text:"What might cause you to leave an airline?" }
 ];
 
-// ---- Helpers: language switch detection
-function normalize(s){ return (s||"").toLowerCase().replace(/\s+/g," ").trim(); }
-
-function detectLanguageRequest(userText){
-  const t = normalize(userText);
-  // common patterns
-  if (t.includes("suomeksi") || t.includes("in finnish") || t.includes("finnish")) return "Finnish";
-  if (t.includes("englanniksi") || t.includes("in english") || t.includes("english")) return "English";
-  // generic: "in Spanish", "in German", "in French", etc.
-  const m = t.match(/\bin ([a-zäöå]+)\b/);
-  if (m && m[1]) {
-    // crude normalize capitalization
-    const lang = m[1].charAt(0).toUpperCase() + m[1].slice(1);
-    // avoid false positives like "in a"
-    if (lang.length >= 4) return lang;
-  }
-  return null;
-}
-
-// ---- Anti-speedrun gate (behavioural)
+// ---- Behavioural gating
 const NONANSWER_PATTERNS = [
   "i don't know","idk","never","i have never","can't think","no example",
   "en tiedä","en osaa","en ole koskaan","en ole ikinä","ei tule mieleen","ei oo kokemusta","ei ole kokemusta",
   "vaikea sanoa","en muista"
 ];
-
 function isNonAnswer(text){
   const n = normalize(text);
   if (!n) return true;
   if (n.length < 18) return true;
   return NONANSWER_PATTERNS.some(p => n.includes(p));
 }
-
 function detectExample(text){
   const n = normalize(text);
-  const cues = ["once","one time","when i","i was","we were","i had to","i decided","the situation","at that time",
-                "kerran","tilanne","olin","me olimme","jouduin","päätin","tapahtui","silloin"];
-  return cues.some(c => n.includes(c));
+  return ["once","one time","when i","i was","we were","i had to","i decided","kerran","tilanne","olin","jouduin","päätin","tapahtui"].some(c=>n.includes(c));
 }
 function detectOutcome(text){
   const n = normalize(text);
-  const cues = ["result","outcome","in the end","afterwards","we ended up","learned","changed",
-                "lopputulos","tulos","sen jälkeen","päädyimme","opin","muutin"];
-  return cues.some(c => n.includes(c));
+  return ["result","outcome","in the end","afterwards","learned","changed","lopputulos","tulos","sen jälkeen","opin","muutin"].some(c=>n.includes(c));
 }
 function countAnchors(text){
   const n = normalize(text);
-  let a = 0;
-  if (["trigger","hard limit","gate","criteria","minima","raja","laukaisi","kriteeri"].some(x=>n.includes(x))) a++;
+  let a=0;
+  if (["trigger","hard limit","criteria","minima","raja","laukaisi","kriteeri"].some(x=>n.includes(x))) a++;
   if (["option","alternative","considered","vaihtoehto","harkitsin"].some(x=>n.includes(x))) a++;
   if (["risk","trade-off","kompromissi","riski"].some(x=>n.includes(x))) a++;
-  if (["communicat","brief","crm","told","said","kerroin","kommunikoin","briefasin"].some(x=>n.includes(x))) a++;
+  if (["communicat","brief","crm","told","kerroin","kommunikoin"].some(x=>n.includes(x))) a++;
   if (["learn","changed","next time","opin","muutin","jatkossa"].some(x=>n.includes(x))) a++;
   return a;
 }
-
-function resetGate(){ FLOW.gate = { hasExample:false, hasOutcome:false, anchors:0, attempts:0 }; }
-function updateGateFromAnswer(text){
-  FLOW.gate.hasExample = FLOW.gate.hasExample || detectExample(text);
-  FLOW.gate.hasOutcome = FLOW.gate.hasOutcome || detectOutcome(text);
-  FLOW.gate.anchors = Math.max(FLOW.gate.anchors, countAnchors(text));
+function resetGate(){ FLOW.gate = { hasExample:false, hasOutcome:false, anchors:0 }; }
+function updateGate(t){
+  FLOW.gate.hasExample = FLOW.gate.hasExample || detectExample(t);
+  FLOW.gate.hasOutcome = FLOW.gate.hasOutcome || detectOutcome(t);
+  FLOW.gate.anchors = Math.max(FLOW.gate.anchors, countAnchors(t));
 }
 function gatePassed(){ return FLOW.gate.hasExample && FLOW.gate.hasOutcome && FLOW.gate.anchors >= 2; }
 
-// ---- Determine level after calibration
 function pickLevel(stageText, hoursText){
   const t = (stageText+" "+hoursText).toLowerCase();
   const m = t.match(/(\d{1,6})/);
@@ -215,263 +192,159 @@ function pickLevel(stageText, hoursText){
   }
   return advanced ? 2 : 1;
 }
+function nextTechBank(){
+  return (FLOW.level===3) ? TECH_L3 : (FLOW.level===2 ? TECH_L2 : TECH_L1);
+}
 
-// ---- WebRTC helpers
+// ---- WebRTC messaging
 function sendEvent(obj){
   if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
 }
 
-/**
- * askQuestion:
- * - If FLOW.lang is English: ask exactly in English.
- * - If not: instruct model to translate the English question into requested language,
- *   while keeping aviation terms in English.
- */
-function askQuestion(englishText, opts={}){
+// Ask a question and ONLY THEN arm transcription acceptance
+function askQuestion(id, englishText){
+  if (FLOW.busyAsking) return;
+  FLOW.busyAsking = true;
+  FLOW.awaitingId = id;
+  FLOW.armed = false; // will arm after assistant starts output
+
   const lang = FLOW.lang || "English";
-
   const mustKeep = ENGLISH_TERMS.join(", ");
-  const base = `
-LANGUAGE TARGET: ${lang}
-TERMS MUST REMAIN ENGLISH: ${mustKeep}
 
-Your task:
+  const instructions = `
+LANGUAGE TARGET: ${lang}
+TERMS MUST REMAIN ENGLISH (do NOT translate): ${mustKeep}
+
+Task:
 - Ask exactly ONE interview question.
-- No acknowledgements. No commentary.
-- If LANGUAGE TARGET is not English: translate the question into that language, but keep the listed terms in English unchanged.
-- Output only the question text.
+- If LANGUAGE TARGET is not English, translate the question into that language, but keep the listed terms in English unchanged.
+- Output ONLY the question. No filler, no commentary.
+
+QUESTION:
+${englishText}
 `;
 
-  const content = opts.preface
-    ? `${base}\n${opts.preface}\nQUESTION:\n${englishText}`
-    : `${base}\nQUESTION:\n${englishText}`;
-
-  sendEvent({
-    type: "response.create",
-    response: {
-      modalities: ["audio","text"],
-      instructions: content
-    }
-  });
+  sendEvent({ type:"response.create", response:{ modalities:["audio","text"], instructions } });
 }
 
-// ---- Interview engine
-const store = { stage:"", hours:"", prev:"" };
-
-function nextTechnicalBank(){
-  return (FLOW.level===3) ? TECH_L3 : (FLOW.level===2 ? TECH_L2 : TECH_L1);
-}
-
+// Advance engine
 function askNext(){
-  // Phase 1: calibration
   if (FLOW.phase === 1) {
     const q = Q_CAL[FLOW.idx];
     if (!q) {
       FLOW.level = pickLevel(store.stage, store.hours);
-      FLOW.phase = 2; FLOW.idx = 0;
+      FLOW.phase=2; FLOW.idx=0;
       askNext(); return;
     }
-    // intro statement + first question
-    if (q.isStatement) {
-      askQuestion(q.text, { preface: "Say this line exactly, then wait." });
-      FLOW.idx++; // next call will ask cal_stage
-      // Immediately ask the first calibration question as a separate turn:
-      setTimeout(() => askQuestion(Q_CAL[FLOW.idx].text), 250);
-      return;
-    }
-    askQuestion(q.text);
+    askQuestion(q.id, q.text);
     return;
   }
-
-  // Phase 2: HR
   if (FLOW.phase === 2) {
     const q = Q_HR[FLOW.idx];
     if (!q) { FLOW.phase=3; FLOW.idx=0; resetGate(); askNext(); return; }
-    askQuestion(q.text);
+    askQuestion(q.id, q.text);
     return;
   }
-
-  // Phase 3: Behavioural (gated)
   if (FLOW.phase === 3) {
     const q = Q_BEH[FLOW.idx];
     if (!q) { FLOW.phase=4; FLOW.idx=0; askNext(); return; }
-    askQuestion(q.text);
+    askQuestion(q.id, q.text);
     return;
   }
-
-  // Phase 4: Technical (4–6 questions)
   if (FLOW.phase === 4) {
-    const bank = nextTechnicalBank();
-    const maxQ = Math.min(6, bank.length); // cap 6
+    const bank = nextTechBank();
+    const maxQ = Math.min(6, bank.length);
     if (FLOW.idx === 0) {
-      askQuestion("We will now move to a short technical segment.", { preface: "Say this line exactly as written." });
-      FLOW.idx++; // next will be first tech question
-      setTimeout(() => askQuestion(bank[0]), 250);
+      askQuestion("tech_intro", "We will now move to a short technical segment.");
+      FLOW.idx = 1;
       return;
     }
     const techIdx = FLOW.idx - 1;
     if (techIdx >= maxQ) { FLOW.phase=5; FLOW.idx=0; askNext(); return; }
-    askQuestion(bank[techIdx]);
+    askQuestion(`tech_${techIdx+1}`, bank[techIdx]);
     return;
   }
-
-  // Phase 5: Motivation
   if (FLOW.phase === 5) {
     const q = Q_MOT[FLOW.idx];
-    if (!q) { FLOW.phase=6; FLOW.idx=0; startDebrief(); return; }
-    askQuestion(q.text);
+    if (!q) {
+      askQuestion("end", "This concludes the interview simulation. Thank you.");
+      FLOW.phase=6;
+      return;
+    }
+    askQuestion(q.id, q.text);
     return;
   }
 }
 
-function startDebrief(){
-  const lang = FLOW.lang || "English";
-  const mustKeep = ENGLISH_TERMS.join(", ");
+// Handle user transcript ONLY when armed and awaitingId exists
+function handleUserTranscript(rawText){
+  const t = (rawText||"").trim();
+  if (!FLOW.awaitingId) return;
+  if (!FLOW.armed) return;            // <-- CRITICAL: ignore early/noise transcripts
+  if (t.length < 2) return;
 
-  const transcriptText = FLOW.transcript
-    .slice(-120) // safety cap
-    .map(x => `${x.role.toUpperCase()}: ${x.text}`)
-    .join("\n");
-
-  const instructions = `
-You are now in DEBRIEF MODE.
-
-LANGUAGE:
-- Write the debrief in ${lang}.
-- Keep aviation/technical terms in English: ${mustKeep}
-
-Rules:
-- Professional, analytical, constructive.
-- No praise. No humiliation. No model answers.
-- Be specific about what was missing if answers were weak or generic.
-
-Output the debrief with these headings:
-
-#1 Overall Impression
-- Readiness level (Early / Developing / Competitive / Strong)
-- Main strengths
-- Main development areas
-
-#2 Behavioural Evaluation
-Assess:
-- Safety & risk thinking
-- Decision structure
-- Use of concrete triggers
-- Communication clarity
-- CRM awareness
-- Stress handling
-- Self-awareness
-For each:
-- What worked
-- Where answers were too general
-- Where clearer decision gates were needed
-
-#3 Technical Evaluation
-- Conceptual understanding
-- Operational reasoning
-- Depth relative to experience level
-
-#4 Interview Behaviour
-- Structure of answers
-- Clarity
-- Conciseness
-- Logical flow
-- Confidence
-
-#5 Priority Development Plan
-Provide 3–5 specific training priorities (no motivational fluff).
-
-Here is the interview transcript:
-${transcriptText}
-`;
-
-  sendEvent({
-    type: "response.create",
-    response: { modalities: ["audio","text"], instructions }
-  });
-}
-
-function handleUserTranscript(text){
-  const t = (text||"").trim();
-  if (!t) return;
+  const answerFor = FLOW.awaitingId;
+  FLOW.awaitingId = null;
+  FLOW.armed = false;
+  FLOW.busyAsking = false;
 
   FLOW.transcript.push({ role:"user", text:t });
 
-  // language request handling (works anytime)
   const req = detectLanguageRequest(t);
   if (req) FLOW.lang = req;
 
-  // Phase 1 store calibration
+  // Phase 1
   if (FLOW.phase === 1) {
-    // idx currently points to next question to ask, but user answered previous one.
-    // We infer based on idx value progression.
-    // After intro, we asked stage (idx=1). When user answers stage, we should store stage, etc.
-    // We'll store sequentially:
-    if (!store.stage) store.stage = t;
-    else if (!store.hours) store.hours = t;
-    else if (!store.prev) store.prev = t;
-
+    if (FLOW.idx === 0) store.stage = t;
+    if (FLOW.idx === 1) store.hours = t;
+    if (FLOW.idx === 2) store.prev  = t;
     FLOW.idx++;
     askNext();
     return;
   }
 
-  // Phase 2 HR: light probing but always progress (one follow-up could be added later)
+  // Phase 2 HR: always progress
   if (FLOW.phase === 2) {
     FLOW.idx++;
     askNext();
     return;
   }
 
-  // Phase 3 Behavioural: gating (THIS is the anti-speedrun)
+  // Phase 3 behavioural: gated
   if (FLOW.phase === 3) {
-    // If totally non-answer: do not progress. Force example from other context.
     if (isNonAnswer(t)) {
-      askQuestion(
-        "Please give a real example from another context (work, studies, sports, leadership, personal pressure). What happened and what did you do?",
-        { preface: "Do NOT progress. The candidate has not provided a usable example." }
-      );
+      askQuestion("beh_gate_retry",
+        "Please give a real example from another context (work, studies, sports, leadership, personal pressure). What happened and what did you do?");
       return;
     }
-
-    updateGateFromAnswer(t);
-
+    updateGate(t);
     if (!FLOW.gate.hasExample) {
-      askQuestion("Give one concrete situation: where were you, what happened, and what was your role?");
+      askQuestion("beh_gate_ex", "Give one concrete situation: where were you, what happened, and what was your role?");
       return;
     }
     if (!FLOW.gate.hasOutcome) {
-      askQuestion("What was the outcome, and what changed afterwards?");
+      askQuestion("beh_gate_out", "What was the outcome, and what changed afterwards?");
       return;
     }
     if (FLOW.gate.anchors < 2) {
-      askQuestion("What alternatives did you consider, and what was the objective trigger for your decision?");
+      askQuestion("beh_gate_anchor", "What alternatives did you consider, and what was the objective trigger for your decision?");
       return;
     }
-
-    // Passed gate -> progress to next competency
     resetGate();
     FLOW.idx++;
     askNext();
     return;
   }
 
-  // Phase 4 technical: progress
-  if (FLOW.phase === 4) {
-    FLOW.idx++;
-    askNext();
-    return;
-  }
-
-  // Phase 5 motivation: progress
-  if (FLOW.phase === 5) {
+  // Phase 4 tech + Phase 5 motivation: progress
+  if (FLOW.phase === 4 || FLOW.phase === 5) {
     FLOW.idx++;
     askNext();
     return;
   }
 }
 
-// ---- WebRTC start/stop
+// ---- WebRTC connect
 async function getEphemeralKey(){
   const r = await fetch("/api/realtime-token", { method:"POST" });
   const j = await r.json().catch(()=>({}));
@@ -489,23 +362,27 @@ function sessionUpdate(){
       temperature: 0.6,
       voice: "alloy",
       input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
-      // Critical: model does NOT auto-respond; we trigger responses
+      // Model does not auto-respond; we trigger responses
       turn_detection: { type: "semantic_vad", eagerness: "medium", create_response: false }
     }
   });
 }
 
 async function start(){
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  logEl.textContent = "";
+  startBtn.disabled=true;
+  stopBtn.disabled=false;
+  logEl.textContent="";
   setStatus("Starting...");
 
-  // reset flow
-  FLOW.lang = "English";
-  FLOW.phase = 1; FLOW.idx = 0;
-  FLOW.level = 2;
-  FLOW.transcript = [];
+  // reset
+  FLOW.lang="English";
+  FLOW.phase=1;
+  FLOW.idx=0;
+  FLOW.level=2;
+  FLOW.transcript=[];
+  FLOW.awaitingId=null;
+  FLOW.armed=false;
+  FLOW.busyAsking=false;
   resetGate();
   store.stage=""; store.hours=""; store.prev="";
 
@@ -518,32 +395,35 @@ async function start(){
   pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
 
   localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
-  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  localStream.getTracks().forEach(t=>pc.addTrack(t, localStream));
 
   dc = pc.createDataChannel("oai-events");
-  dc.onopen = () => {
+  dc.onopen = async () => {
     setStatus("Connected.");
-    log("Connected (data channel open).");
+    log("Connected.");
 
     sessionUpdate();
 
-    // Kick off first prompt
+    // IMPORTANT: wait a bit so first audio is not clipped
+    await new Promise(r=>setTimeout(r, 700));
+
     askNext();
   };
 
   dc.onmessage = (ev) => {
     let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+
     if (msg.type === "error") log("ERROR: " + JSON.stringify(msg));
 
-    if (msg.type === "conversation.item.input_audio_transcription.completed") {
-      const text = msg.transcript || msg.text || "";
-      FLOW.transcript.push({ role:"user", text });
-      handleUserTranscript(text);
+    // Arm transcript acceptance when assistant output actually starts
+    if (msg.type === "response.output_audio.delta" || msg.type === "response.output_text.delta") {
+      // Once we have any assistant output for the current question, arm input consumption
+      FLOW.armed = true;
     }
 
-    // Store assistant outputs for debrief context if needed
-    if (msg.type === "response.output_text.delta") {
-      // optional: not needed
+    if (msg.type === "conversation.item.input_audio_transcription.completed") {
+      const text = msg.transcript || "";
+      handleUserTranscript(text);
     }
   };
 
@@ -551,8 +431,8 @@ async function start(){
   await pc.setLocalDescription(offer);
 
   const sdpRes = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent("gpt-4o-realtime-preview")}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${ephemeralKey}`, "Content-Type": "application/sdp" },
+    method:"POST",
+    headers:{ Authorization:`Bearer ${ephemeralKey}`, "Content-Type":"application/sdp" },
     body: offer.sdp
   });
 
@@ -563,8 +443,8 @@ async function start(){
 }
 
 function stop(){
-  stopBtn.disabled = true;
-  startBtn.disabled = false;
+  stopBtn.disabled=true;
+  startBtn.disabled=false;
   setStatus("Stopped.");
 
   try { if (dc) dc.close(); } catch {}
@@ -575,7 +455,7 @@ function stop(){
   localStream=null;
 }
 
-startBtn.onclick = () => start().catch(e => {
+startBtn.onclick = () => start().catch(e=>{
   console.error(e);
   alert(e?.message || String(e));
   log("START ERROR: " + (e?.message || String(e)));
@@ -585,3 +465,4 @@ stopBtn.onclick = stop;
 </script>
 </body>
 </html>
+
