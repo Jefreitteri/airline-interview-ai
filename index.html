@@ -2,16 +2,17 @@
 <html>
 <head>
   <meta charset="UTF-8" />
-  <title>Airline Interview AI (Locked Voice)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Airline Interview AI (Voice)</title>
   <style>
     body { font-family: system-ui, Arial, sans-serif; margin: 20px; }
-    button { margin-right: 10px; padding: 8px 12px; }
+    button { margin-right: 10px; padding: 10px 14px; }
     #status { margin: 10px 0; color: #444; }
-    #log { white-space: pre-wrap; font-size: 12px; color: #333; }
+    #log { white-space: pre-wrap; font-size: 12px; color: #333; background:#f6f6f6; padding:10px; border-radius:8px; max-height: 40vh; overflow:auto; }
   </style>
 </head>
 <body>
-  <h1>Airline Interview AI 123 (Locked Voice)</h1>
+  <h1>Airline Interview AI (Voice)</h1>
 
   <button id="startBtn">Start</button>
   <button id="stopBtn" disabled>Stop</button>
@@ -20,76 +21,64 @@
   <div id="log"></div>
 
 <script>
-let pc;
-let localStream;
-let dataChannel;
-let audioEl;
+let pc, localStream, dataChannel, audioEl;
 
 const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
 const statusEl = document.getElementById("status");
 const logEl    = document.getElementById("log");
 
-function log(msg) {
-  logEl.textContent += msg + "\n";
-}
+function log(msg){ logEl.textContent = (logEl.textContent + msg + "\n").slice(-8000); }
 
-startBtn.onclick = async () => {
+async function start(){
   startBtn.disabled = true;
   stopBtn.disabled = false;
+  logEl.textContent = "";
   statusEl.textContent = "Requesting microphone…";
 
-  // 1) get ephemeral client_secret from backend
   const tokenResp = await fetch("/api/realtime-token", { method: "POST" });
-  const tokenData = await tokenResp.json();
-
+  const tokenData = await tokenResp.json().catch(()=>({}));
   const ephemeralKey = tokenData?.client_secret?.value;
+
   if (!ephemeralKey) {
+    console.log(tokenData);
+    alert("Failed to get realtime token. Check Vercel env OPENAI_API_KEY + function logs.");
     startBtn.disabled = false;
     stopBtn.disabled = true;
-    alert("Failed to get realtime token. Check Vercel logs + OPENAI_API_KEY.");
-    console.log(tokenData);
+    statusEl.textContent = "Idle.";
     return;
   }
 
-  // 2) WebRTC
   pc = new RTCPeerConnection();
 
-  // Audio output from model
   audioEl = document.createElement("audio");
   audioEl.autoplay = true;
+  audioEl.playsInline = true;
   pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
 
-  // Data channel to see events/errors (optional but useful)
   dataChannel = pc.createDataChannel("oai-events");
   dataChannel.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data);
-      // Show only errors to keep noise low
-      if (msg?.type?.includes("error")) log("ERROR: " + ev.data);
-    } catch {
-      // ignore
-    }
+      if (msg?.type === "error") log("ERROR: " + ev.data);
+    } catch {}
   };
 
-  // Mic input
   localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-  // Create offer
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  // 3) Send SDP to Realtime endpoint
   statusEl.textContent = "Connecting…";
 
   const baseUrl = "https://api.openai.com/v1/realtime";
-  const model   = "gpt-4o-realtime-preview";
+  const model = "gpt-4o-realtime-preview";
 
   const sdpResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${ephemeralKey}`,
+      Authorization: `Bearer ${ephemeralKey}`,
       "Content-Type": "application/sdp"
     },
     body: offer.sdp
@@ -98,33 +87,35 @@ startBtn.onclick = async () => {
   const answerSDP = await sdpResp.text();
   await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
 
-  statusEl.textContent = "Connected. Interview running.";
-  log("Realtime interview started.");
-};
+  statusEl.textContent = "Connected. Speak normally.";
+  log("Connected.");
+}
 
-stopBtn.onclick = () => {
+function stop(){
   stopBtn.disabled = true;
   startBtn.disabled = false;
 
-  if (dataChannel) {
-    try { dataChannel.close(); } catch {}
-    dataChannel = null;
-  }
+  try { if (dataChannel) dataChannel.close(); } catch {}
+  dataChannel = null;
 
-  if (pc) {
-    try { pc.close(); } catch {}
-    pc = null;
-  }
+  try { if (pc) pc.close(); } catch {}
+  pc = null;
 
-  if (localStream) {
-    localStream.getTracks().forEach(t => t.stop());
-    localStream = null;
-  }
+  try { if (localStream) localStream.getTracks().forEach(t => t.stop()); } catch {}
+  localStream = null;
 
   statusEl.textContent = "Stopped.";
-  log("Interview stopped.");
-};
+  log("Stopped.");
+}
+
+startBtn.onclick = () => start().catch(e => {
+  console.error(e);
+  alert(e?.message || String(e));
+  log("START ERROR: " + (e?.message || String(e)));
+  stop();
+});
+
+stopBtn.onclick = stop;
 </script>
 </body>
 </html>
-
