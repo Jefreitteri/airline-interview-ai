@@ -56,6 +56,13 @@ Rephrase and ask again.
 STRUCTURE
 
 You will move through five phases.
+STRUCTURE ENFORCEMENT (critical):
+- You MUST complete Phase 1 exactly with the 3 calibration questions (stage, hours, previous interviews before any other topic.
+- You MUST complete phase 2 with the 4 HR questions before phase 3.
+- In phase 3, you MUST ask atleast 8 primary behavioural scenario questions, one per competency listed, before starting phase 4.
+- Keep an internal checklist of the 8 competencies; do not proceed to technical until all 8 are covered.
+- Do not end the interview before phase 5 is completed and debrief is delivered.
+- Interview should last 45 - 50 minutes.
 
 ⸻
 
@@ -356,7 +363,7 @@ CRITICAL OUTPUT FORMAT RULES (must follow):
       temperature: 0.6, // (your earlier error proved <0.6 can be rejected in some configs)
       instructions: `${INTERVIEW_PROMPT}\n\n${LOCKS}`,
       // Better for not interrupting:
-      turn_detection: { type: "semantic_vad", eagerness: "low" },
+      turn_detection: { type: "semantic_vad", eagerness: "medium" },
     };
 
     const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
