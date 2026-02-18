@@ -1,649 +1,130 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Airline Interview simulator</title>
+  <title>Airline Interview AI (Locked Voice)</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 18px; }
-    button { padding: 10px 14px; margin-right: 10px; }
-    #status { margin-top: 10px; opacity: 0.85; }
-    #log { margin-top: 10px; white-space: pre-wrap; font-size: 12px; opacity: 0.75; max-height: 40vh; overflow:auto; background:#f6f6f6; padding:10px; border-radius:8px;}
+    body { font-family: system-ui, Arial, sans-serif; margin: 20px; }
+    button { margin-right: 10px; padding: 8px 12px; }
+    #status { margin: 10px 0; color: #444; }
+    #log { white-space: pre-wrap; font-size: 12px; color: #333; }
   </style>
 </head>
 <body>
-  <h1>Airline Interview simulator</h1>
+  <h1>Airline Interview AI (Locked Voice)</h1>
+
   <button id="startBtn">Start</button>
   <button id="stopBtn" disabled>Stop</button>
-  <div id="status">Idle</div>
+
+  <div id="status">Idle.</div>
   <div id="log"></div>
 
 <script>
-/**
- * LOCKED FLOW:
- * - Client controls every question in order.
- * - Calibration cannot be skipped.
- * - No “difficult passenger” question exists at all.
- * - Model cannot freestyle because create_response=false.
- */
+let pc;
+let localStream;
+let dataChannel;
+let audioEl;
 
 const startBtn = document.getElementById("startBtn");
 const stopBtn  = document.getElementById("stopBtn");
 const statusEl = document.getElementById("status");
 const logEl    = document.getElementById("log");
-const setStatus = (s) => statusEl.textContent = s;
-const log = (s) => { logEl.textContent = (logEl.textContent + s + "\n").slice(-8000); };
 
-let pc = null;
-let dc = null;
-let localStream = null;
-let audioEl = null;
-
-// ====== YOUR PROMPT 1:1 (as provided) ======
-const SYSTEM_PROMPT = `You are a three-member airline interview panel conducting a structured competency-based interview for a pilot position.
-
-This is a realistic interview simulation designed as a training tool for airline job preparation.
-
-You are not a coach during the interview phase.
-You do not provide feedback during the interview.
-You do not provide model answers during the interview.
-Ask one question per time.
-Do not announce the phase.
-Do not use filler acknowledgements such as:
-- "Thank you for your answer"
-- "Okay"
-- "I see"
-- "Alright"
-After the candidate finishes speaking, move directly to the next question or follow-up without verbal acknowledgement.
-Do not repeat or paraphrase the candidate's answer unless clarification is necessary.
-
-However, after the interview is completed, you will enter a structured debrief mode.
-
-⸻
-
-INTERVIEW MODE
-
-General Behaviour
-        •       Professional, calm, neutral.
-        •       No praise.
-        •       No emotional reassurance.
-        •       No coaching.
-        •       Ask one primary question at a time.
-        •       Allow the candidate to speak freely.
-        •       Do NOT interrupt longer explanations.
-        •       Do NOT cut off detailed answers.
-        •       Ask precise follow-up questions only after the candidate finishes.
-
-If the candidate asks for help:
-
-“In a real airline interview I cannot coach you. Please answer using a real example.”
-
-If the candidate tries to skip a question:
-Rephrase and ask again.
-
-⸻
-
-STRUCTURE
-
-You will move through five phases.
-
-⸻
-
-Interview depth requirements:
-The behavioural section should be the longest part of the interview.
-
-Minimum:
-- 8 primary behavioural questions (one per competency)
-- With follow-up probing where reasoning is unclear.
-
-The full interview (excluding debrief) shoould feel comparable to a 40-50 minute airline screening interview.
-
-Do not rush transitions.
-Do not move to technical questions prematurely
-Only move to the technical segment once all required competencies have been clearly explored.
-If in doubt, ask one additional behavioural scenario before transitioning.
-
-⸻
-
-PHASE 1 – Calibration
-
-Start with:
-
-“We will conduct an airline interview simulation. Please answer using real examples from your experience.”
-
-Ask:
-        •       What stage are you currently at in your aviation career?
-        •       Approximately how many flight hours do you have?
-        •       Have you previously attended airline interviews?
-
-Internally classify:
-Level 1 – Student / Low hours
-Level 2 – CPL / Advanced
-Level 3 – Experienced
-
-Do NOT announce the level.
-
-Adjust technical depth accordingly.
-
-⸻
-
-PHASE 2 – HR & Fit (Light Probing Only)
-
-Purpose: clarity, not pressure.
-
-Ask:
-        •       Tell me about yourself.
-        •       Why do you want to work for this airline?
-        •       Why should we select you?
-        •       What is one development area you are currently working on?
-
-Rules:
-        •       Allow full explanation.
-        •       Ask at most ONE clarification follow-up per question.
-        •       Do NOT aggressively cross-examine motivation.
-        •       If answer is generic, ask:
-“Can you make that more specific?”
-        •       Then move forward.
-
-Do not escalate pressure in this section.
-
-⸻
-
-PHASE 3 – Behavioural & Operational Decision-Making
-
-Competency coverage requirement (critical)
-You must cover ALL of the following competencies during phase 3.
-At least ONE primary behavioural scenario question per competency is required before moving to the technical segment.
-Do not move to phase 4 until all competencies have been addressed.
-For each competency:
-- Ask one primary scenario question.
-- Allow full explanation
-- Ask 1-3 targeted follow-up questions IF needed.
-Purpose: develop structured thinking.
-
-Assess internal competencies (do NOT announce):
-        •       Safety mindset & rule adherence
-        •       Decision-making & problem-solving
-        •       Risk assessment
-        •       Communication
-        •       CRM / teamwork
-        •       Stress & workload management
-        •       Self-awareness
-
-Rules:
-        •       Ask one scenario at a time.
-        •       Allow full explanation.
-        •       After the answer, ask up to 2–3 targeted follow-ups.
-        •       Focus on decision triggers and reasoning.
-
-When probing, prioritize:
-        •       What were your hard limits?
-        •       What alternatives did you consider?
-        •       What risk trade-offs did you evaluate?
-        •       What triggered the final decision?
-        •       What would have made you abort earlier?
-        •       What did you learn?
-
-If the answer is mostly based on feeling:
-Ask:
-“What was the objective trigger for that decision?”
-
-Accept non-aviation examples if relevant.
-
-Do not over-probe once reasoning is clear.
-
-⸻
-
-PHASE 4 – Technical Segment (Firm but Not Aggressive)
-
-Before starting say:
-
-“We will now move to a short technical segment.”
-
-Select 4–6 questions from the technical bank.
-
-Rules:
-        •       No more than 2 questions from same category.
-        •       Adjust difficulty to experience level.
-        •       Ask one question at a time.
-        •       If answer is partially correct, probe conceptual understanding.
-        •       Do NOT lecture.
-        •       Do NOT provide correct answers during interview.
-        •       Do NOT turn it into rapid-fire questioning.
-
-Focus on operational understanding, not memorization.
-
-If misunderstanding is significant:
-Ask one clarifying question.
-Then move on.
-
-QUESTION BANK
-
-⸻
-
-CATEGORY A – Performance & Takeoff
-        1.      What is the difference between V1 and V2?
-        2.      What factors affect takeoff performance?
-        3.      What is balanced field length?
-        4.      What happens if an engine fails before V1?
-        5.      What happens if an engine fails after V1?
-        6.      What is accelerate-stop distance?
-
-⸻
-
-CATEGORY B – Approach & Landing
-        7.      What is the difference between DA and MDA?
-        8.      When are you allowed to descend below MDA?
-        9.      What defines a stabilized approach?
-        10.     What are common causes of unstable approaches?
-        11.     What factors affect landing distance?
-
-⸻
-
-CATEGORY C – Fuel & Planning
-        12.     What is contingency fuel?
-        13.     What is alternate fuel?
-        14.     When must a destination alternate be nominated?
-        15.     What factors influence fuel planning decisions?
-        16.     What would you do if fuel becomes marginal enroute?
-
-⸻
-
-CATEGORY D – Weather & Icing
-        17.     What conditions are most conducive to airframe icing?
-        18.     What is windshear and why is it dangerous?
-        19.     What are typical signs of an approaching thunderstorm?
-        20.     How does density altitude affect aircraft performance?
-
-⸻
-
-CATEGORY E – CRM & Operational Awareness
-        21.     What is the role of CRM in preventing accidents?
-        22.     How would you handle a disagreement with a captain?
-        23.     What is threat and error management?
-        24.     What is situational awareness and how can it degrade?
-
-⸻
-
-CATEGORY F – General Operational Knowledge
-        25.     What is RVSM and why is it important?
-        26.     What is the purpose of a sterile cockpit rule?
-        27.     What is the difference between CAT I and CAT III approach?
-        28.     What are the responsibilities of the pilot flying vs pilot monitoring?
-⸻
-
-PHASE 5 – Motivation & Realism
-
-Ask:
-        •       Where do you see yourself in five years?
-        •       What do you think will be most challenging about airline life?
-        •       What might cause you to leave an airline?
-
-Light probing only.
-
-Then say:
-
-“This concludes the interview simulation. We will now move to the debrief.”
-
-⸻
-
-DEBRIEF MODE
-
-Tone:
-Professional, analytical, constructive.
-No praise.
-No humiliation.
-No model answers.
-
-⸻
-
-#1 Overall Impression
-
-Provide:
-        •       Readiness level (Early / Developing / Competitive / Strong)
-        •       Main strengths
-        •       Main development areas
-
-⸻
-
-#2 Behavioural Evaluation
-
-Assess:
-        •       Safety & risk thinking
-        •       Decision structure
-        •       Use of concrete triggers
-        •       Communication clarity
-        •       CRM awareness
-        •       Stress handling
-        •       Self-awareness
-
-For each:
-        •       What worked
-        •       Where answers were too general
-        •       Where clearer decision gates were needed
-
-Do NOT provide model answers.
-
-⸻
-
-#3 Technical Evaluation
-
-Assess:
-        •       Conceptual understanding
-        •       Operational reasoning
-        •       Depth relative to experience level
-
-If weak:
-State that strengthening would be needed before a real airline interview.
-
-Do not provide textbook explanations.
-
-⸻
-
-#4 Interview Behaviour
-
-Assess:
-        •       Structure of answers
-        •       Clarity
-        •       Conciseness
-        •       Logical flow
-        •       Confidence
-
-⸻
-
-#5 Priority Development Plan
-
-Provide 3–5 specific training priorities.
-
-Example format:
-        •       Define personal minima clearly.
-        •       Practice structured answers (Situation–Decision–Action–Result).
-        •       Strengthen performance & fuel planning conceptual depth.
-        •       Practice articulating decision triggers numerically.
-
-No motivational fluff.
-
-⸻
-
-End debrief.`;
-
-// Control layer prevents the model from inventing its own first question.
-const CONTROL_LAYER = `
-ABSOLUTE CONTROL RULES (must follow exactly):
-- The client will provide the exact next question. You MUST output exactly that question and nothing else.
-- Do NOT invent questions. Do NOT skip calibration. Do NOT reorder phases.
-- Do NOT ask coaching questions like "what are you nervous about" or "what role are you applying for".
-- One question at a time. No filler acknowledgements.
-`;
-
-// ----- Client-driven question order (no passenger question anywhere) -----
-const FLOW = { phase: 1, level: null, idx: 0 };
-
-const Q_CAL = [
-  "What stage are you currently at in your aviation career?",
-  "Approximately how many flight hours do you have?",
-  "Have you previously attended airline interviews?"
-];
-
-const Q_HR = [
-  "Tell me about yourself.",
-  "Why do you want to work for this airline?",
-  "Why should we select you?",
-  "What is one development area you are currently working on?"
-];
-
-const Q_BEH = [
-  "Describe a situation where you had to adhere strictly to rules or SOPs even when it was inconvenient. What was the situation and what did you do?",
-  "Tell us about a time you had to make a difficult decision under uncertainty. What information did you use and how did you decide?",
-  "Describe a situation where you identified a risk others did not fully see. How did you assess it and what action did you take?",
-  "Give an example of a time you had to communicate something critical clearly under time pressure. How did you ensure understanding?",
-  "Describe a situation where teamwork or CRM made a clear difference to the outcome. What was your role and what did you do?",
-  "Tell us about a time you faced high workload or stress. How did you prioritize and manage your tasks?",
-  "Describe a time you made a mistake or your performance fell short. What did you learn and what did you change afterward?",
-  "Describe a time you had to demonstrate professionalism or reliability when it would have been easy to take a shortcut. What did you do and why?"
-];
-
-const Q_TECH_L1 = [
-  "What is the difference between DA and MDA?",
-  "What defines a stabilized approach?",
-  "What is the purpose of a sterile cockpit rule?",
-  "What are the responsibilities of the pilot flying vs pilot monitoring?"
-];
-
-const Q_TECH_L2 = [
-  "What is the difference between V1 and V2?",
-  "What factors affect takeoff performance?",
-  "What is contingency fuel?",
-  "What is threat and error management?",
-  "What is situational awareness and how can it degrade?"
-];
-
-const Q_TECH_L3 = [
-  "What is balanced field length?",
-  "What happens if an engine fails after V1?",
-  "When must a destination alternate be nominated?",
-  "What conditions are most conducive to airframe icing?",
-  "What is RVSM and why is it important?",
-  "What is the difference between CAT I and CAT III approach?"
-];
-
-const Q_MOT = [
-  "Where do you see yourself in five years?",
-  "What do you think will be most challenging about airline life?",
-  "What might cause you to leave an airline?"
-];
-
-function sendEvent(obj){
-  if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
+function log(msg) {
+  logEl.textContent += msg + "\n";
 }
 
-function askExact(questionText, prefaceText=null){
-  const instructions = prefaceText
-    ? `${prefaceText}\nAsk EXACTLY this one question next and nothing else:\n${questionText}`
-    : `Ask EXACTLY this one question next and nothing else:\n${questionText}`;
+startBtn.onclick = async () => {
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  statusEl.textContent = "Requesting microphone…";
 
-  sendEvent({
-    type: "response.create",
-    response: { modalities: ["audio","text"], instructions }
-  });
-}
+  // 1) get ephemeral client_secret from backend
+  const tokenResp = await fetch("/api/realtime-token", { method: "POST" });
+  const tokenData = await tokenResp.json();
 
-function chooseLevel(stageText, hoursText){
-  const t = (stageText + " " + hoursText).toLowerCase();
-  const m = t.match(/(\d{1,6})/);
-  const hours = m ? parseInt(m[1], 10) : null;
-  const advanced = ["cpl","atpl","ir","me","type rating","fo","first officer","captain"].some(k => t.includes(k));
-  if (hours !== null) {
-    if (hours < 250 && !advanced) return 1;
-    if (hours < 1200 && !t.includes("captain")) return 2;
-    return 3;
-  }
-  return advanced ? 2 : 1;
-}
-
-const answers = { stage:"", hours:"", attended:"" };
-
-function currentQuestion(){
-  if (FLOW.phase === 1) return Q_CAL[FLOW.idx] || null;
-  if (FLOW.phase === 2) return Q_HR[FLOW.idx] || null;
-  if (FLOW.phase === 3) return Q_BEH[FLOW.idx] || null;
-  if (FLOW.phase === 4) {
-    const bank = FLOW.level===3 ? Q_TECH_L3 : (FLOW.level===2 ? Q_TECH_L2 : Q_TECH_L1);
-    return bank[FLOW.idx] || null;
-  }
-  if (FLOW.phase === 5) return Q_MOT[FLOW.idx] || null;
-  return null;
-}
-
-function phaseAdvanceIfNeeded(){
-  if (FLOW.phase === 1 && FLOW.idx >= Q_CAL.length) { FLOW.level = chooseLevel(answers.stage, answers.hours); FLOW.phase=2; FLOW.idx=0; return true; }
-  if (FLOW.phase === 2 && FLOW.idx >= Q_HR.length)  { FLOW.phase=3; FLOW.idx=0; return true; }
-  if (FLOW.phase === 3 && FLOW.idx >= Q_BEH.length) { FLOW.phase=4; FLOW.idx=0; return true; }
-  if (FLOW.phase === 4) {
-    const bankLen = (FLOW.level===3 ? Q_TECH_L3.length : (FLOW.level===2 ? Q_TECH_L2.length : Q_TECH_L1.length));
-    if (FLOW.idx >= bankLen) { FLOW.phase=5; FLOW.idx=0; return true; }
-  }
-  if (FLOW.phase === 5 && FLOW.idx >= Q_MOT.length) { FLOW.phase=6; return true; }
-  return false;
-}
-
-function startDebrief(){
-  sendEvent({
-    type: "response.create",
-    response: {
-      modalities: ["audio","text"],
-      instructions:
-`This concludes the interview simulation. We will now move to the debrief.
-Produce the structured debrief strictly following DEBRIEF MODE from the system instructions.`
-    }
-  });
-}
-
-function handleTranscript(text){
-  const t = (text||"").trim();
-  if (!t) {
-    const q = currentQuestion();
-    if (q) askExact(q, "Repeat the same question (no acknowledgements).");
+  const ephemeralKey = tokenData?.client_secret?.value;
+  if (!ephemeralKey) {
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    alert("Failed to get realtime token. Check Vercel logs + OPENAI_API_KEY.");
+    console.log(tokenData);
     return;
   }
 
-  // store calibration
-  if (FLOW.phase === 1) {
-    if (FLOW.idx === 0) answers.stage = t;
-    if (FLOW.idx === 1) answers.hours = t;
-    if (FLOW.idx === 2) answers.attended = t;
-  }
-
-  FLOW.idx++;
-
-  if (phaseAdvanceIfNeeded()) {
-    if (FLOW.phase === 6) { startDebrief(); return; }
-    if (FLOW.phase === 4) {
-      // required line before technical
-      const q = currentQuestion();
-      askExact(q, "Say exactly: “We will now move to a short technical segment.”");
-      return;
-    }
-  }
-
-  const q = currentQuestion();
-  if (q) askExact(q);
-}
-
-async function getEphemeralKey(){
-  const r = await fetch("/api/realtime-token", { method:"POST" });
-  const j = await r.json().catch(()=>({}));
-  const key = j?.client_secret?.value;
-  if (!key) throw new Error("Missing client_secret.value");
-  return key;
-}
-
-async function start(){
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  logEl.textContent = "";
-  setStatus("Starting...");
-
-  // reset
-  FLOW.phase = 1; FLOW.level=null; FLOW.idx=0;
-  answers.stage=""; answers.hours=""; answers.attended="";
-
-  const ephemeralKey = await getEphemeralKey();
-
+  // 2) WebRTC
   pc = new RTCPeerConnection();
+
+  // Audio output from model
   audioEl = document.createElement("audio");
   audioEl.autoplay = true;
-  audioEl.playsInline = true;
   pc.ontrack = (e) => { audioEl.srcObject = e.streams[0]; };
 
-  localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
-  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
-  dc = pc.createDataChannel("oai-events");
-  dc.onopen = () => {
-    setStatus("Connected. Interview running.");
-
-    // clear conversation and lock session. Important: create_response=false
-    
-
-    sendEvent({
-      type: "session.update",
-      session: {
-        modalities: ["audio","text"],
-        instructions: SYSTEM_PROMPT + "\n\n" + CONTROL_LAYER,
-        voice: "alloy",
-        temperature: 0.6,
-        input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
-        turn_detection: { type: "server_vad", create_response: false }
-      }
-    });
-
-    // kickoff intro + first calibration Q
-    askExact(
-      Q_CAL[0],
-      "Begin now. Say exactly: “We will conduct an airline interview simulation. Please answer using real examples from your experience.”"
-    );
-  };
-
-  dc.onmessage = (ev) => {
-    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-
-    if (msg.type === "error") log("ERROR: " + JSON.stringify(msg));
-
-    if (msg.type === "conversation.item.input_audio_transcription.completed") {
-      const text = msg.transcript || msg.text || "";
-      log("USER: " + text);
-      handleTranscript(text);
-    }
-
-    if (msg.type === "conversation.item.created" && msg.item?.role === "user") {
-      const c0 = msg.item?.content?.[0] || {};
-      const text = c0.text || c0.transcript || "";
-      if (text) {
-        log("USER(item): " + text);
-        handleTranscript(text);
-      }
+  // Data channel to see events/errors (optional but useful)
+  dataChannel = pc.createDataChannel("oai-events");
+  dataChannel.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      // Show only errors to keep noise low
+      if (msg?.type?.includes("error")) log("ERROR: " + ev.data);
+    } catch {
+      // ignore
     }
   };
 
+  // Mic input
+  localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
+
+  // Create offer
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  const baseUrl = "https://api.openai.com/v1/realtime";
-  const model = "gpt-4o-realtime-preview";
+  // 3) Send SDP to Realtime endpoint
+  statusEl.textContent = "Connecting…";
 
-  const sdpRes = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
+  const baseUrl = "https://api.openai.com/v1/realtime";
+  const model   = "gpt-4o-realtime-preview";
+
+  const sdpResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${ephemeralKey}`, "Content-Type": "application/sdp" },
+    headers: {
+      "Authorization": `Bearer ${ephemeralKey}`,
+      "Content-Type": "application/sdp"
+    },
     body: offer.sdp
   });
 
-  const answerSdp = await sdpRes.text();
-  await pc.setRemoteDescription({ type:"answer", sdp: answerSdp });
+  const answerSDP = await sdpResp.text();
+  await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
 
-  setStatus("Realtime started.");
-}
+  statusEl.textContent = "Connected. Interview running.";
+  log("Realtime interview started.");
+};
 
-function stop(){
+stopBtn.onclick = () => {
   stopBtn.disabled = true;
   startBtn.disabled = false;
-  setStatus("Stopped.");
 
-  try { if (dc) dc.close(); } catch {}
-  try { if (pc) pc.close(); } catch {}
-  dc = null; pc = null;
+  if (dataChannel) {
+    try { dataChannel.close(); } catch {}
+    dataChannel = null;
+  }
 
-  try { if (localStream) localStream.getTracks().forEach(t=>t.stop()); } catch {}
-  localStream = null;
-}
+  if (pc) {
+    try { pc.close(); } catch {}
+    pc = null;
+  }
 
-startBtn.onclick = () => start().catch(e => {
-  console.error(e);
-  alert(e?.message || String(e));
-  log("START ERROR: " + (e?.message || String(e)));
-  stop();
-});
-stopBtn.onclick = stop;
+  if (localStream) {
+    localStream.getTracks().forEach(t => t.stop());
+    localStream = null;
+  }
+
+  statusEl.textContent = "Stopped.";
+  log("Interview stopped.");
+};
 </script>
 </body>
 </html>
+
